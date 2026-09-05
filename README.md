@@ -6,60 +6,22 @@ An FPGA-based SDR modem built around a folded CORDIC front-end.
 CORDIC combines the NCO and mixer into one block, down-converting the RF input to
 baseband, followed by a decimating CIC/FIR chain producing baseband IQ. The same CORDIC
 core runs in reverse as an up-converter (DUC) with an interpolating filter, so RX and TX
-share one front-end. An earlier version used a separate NCO, CORDIC, and complex mixer;
-folding them together removes the discrete complex multiplier entirely, at the cost of one
-extra output bit (see Design facts, below).
+share one front-end.
 
 **Demod/mod split.** Demodulation and modulation happen off the FPGA, in GNU Radio, via a
 file-based flowgraph. The FPGA's job is only the rate-critical front-end; baseband IQ is
 handed off to GNU Radio for the actual demod/mod work.
 
-**Status and sequencing.** Everything is developed and verified in simulation first; there
-is no physical board access right now. FPGA bring-up on a DE1-SoC, with a HackRF as the RF
-front-end, is a later step. The CORDIC core also targets an MPW tapeout.
-
-**Near-term deliverable.** The receive chain end-to-end in simulation — DDC producing an
-IQ file, consumed by a GNU Radio flowgraph for demod — verified against the reference
-model. The transmit path follows the same pattern once RX is solid.
-
 ![RX/TX CORDIC datapath](docs/ddc_duc_datapath.svg)
 
-## Build order
+## Components
 
-- `nco/` — phase accumulator → rotation-mode CORDIC producing sin/cos
-- `mixer/` — complex multiply, down-converting to baseband IQ
-- `decim/` — decimating FIR/CIC, with the CORDIC gain K ≈ 1.6467 folded into the filter
-  coefficients rather than spent on a separate scaling stage
-
-The up-converter (DUC) reuses the same CORDIC core in reverse with an interpolating
-filter, once the DDC side is solid.
-
-## RTL status
-
-`cordic/cordic_core.sv` — the shared iterative rotation-mode CORDIC engine both `nco/`
-and the fused mixer will instantiate. One iteration per clock, 16 cycles per rotation,
-saturating datapath matching the reference model's `sat()`. Verified bit-exact against
-`cordic_rotate()` across 267 vectors under Verilator (`cordic/run_sim.sh`), covering the
-quadrant-residual sweep both mixer architectures use, signal-like random inputs, and
-saturation edge cases.
-
-`nco/`, `mixer/`, and `decim/` don't exist yet — `cordic_core.sv` is the first block
-built.
-
-## Planned comparison study
-
-Two implementations of the same function, synthesised and compared:
-
-1. **Separate** — CORDIC NCO generating sin/cos, feeding a discrete complex multiplier
-   (four real multiplies).
-2. **Fused** — the input sample loaded as the CORDIC's initial vector and rotated by −θ
-   directly, so the rotation is the mix and the complex multiplier disappears entirely.
-
-For the comparison to mean anything, both must be synthesised at matched throughput,
-matched output SNR/SFDR, identical bit widths, and the same tool/target/constraints, with
-Fmax reported alongside area, since a smaller design that misses timing is not a smaller
-design. The conclusion likely differs between FPGA, where multipliers are free hard DSP
-blocks, and ASIC, where multipliers are real area and power.
+- **CORDIC (rotation mode)** — the shared engine behind both directions: fused NCO +
+  mixer for down-conversion on RX, run in reverse for up-conversion on TX.
+- **Decimating FIR/CIC** — the RX-side filter, with the CORDIC gain K ≈ 1.6467 folded
+  into its coefficients rather than spent on a separate scaling stage.
+- **Interpolating filter** — the TX-side counterpart, upsampling ahead of the CORDIC.
+- **GNU Radio** — off-chip, file-based, handles demodulation and modulation.
 
 ## Verification
 
@@ -77,28 +39,19 @@ every intermediate stage (NCO, mixer, output), plus a generated `ddc_params.svh`
 RTL is parameterised from the same numbers. The testbench reads these values rather than
 recomputing the reference, so a sign error shared by both implementations cannot hide.
 
-Current numbers at the default 16-bit config (`--report`):
+Measured at the default 16-bit config (`--report`):
 
 | | SNR | SFDR | ENOB |
 |---|---|---|---|
 | NCO alone | 91.6 dB | 93.3 dB | — |
-| DDC, separate mixer | 76.4 dB | 80.8 dB | 12.39 |
-| DDC, fused mixer | 79.2 dB | 82.8 dB | 12.86 |
+| DDC (fused mixer) | 79.2 dB | 82.8 dB | 12.86 |
 
 ### Design facts from the reference model
 
-The fused mixer needs one more bit than the separate one. Its output is K·x·e^(−jθ) with
-K > 1, so a full-scale input overflows a same-width output. The options are to carry an
-extra bit, back the input off by 4.34 dB, or spend a multiplier undoing K — the last of
-which hands back exactly the multiplier the fused architecture was supposed to save. This
-belongs in the comparison study: "fused removes a complex multiplier but widens the mixer
-output and the FIR input by one bit" is the honest claim, settled only by the netlist.
-
-The 1/K correction goes in a different place per architecture. Separate folds it into the
-CORDIC seed (x0 = 1/K), free, with plain FIR coefficients. Fused has no free seed — the
-signal itself carries the K — so the 1/K lives in the FIR coefficients instead. Both then
-land on the same output scale, which is why their SNRs are comparable at all; getting it
-backwards leaves the design 4.34 dB hot while still looking correct.
+The fused mixer's output is K·x·e^(−jθ) with K > 1, so a full-scale input overflows a
+same-width output — the datapath carries one extra bit to absorb it. The signal itself
+carries the K, with no free CORDIC seed value to fold it into, so the 1/K correction lives
+in the FIR/interpolator coefficients instead.
 
 Only fully-loaded filter outputs are real outputs. Hardware never produces the `n_taps-1`
 tail samples where a filter runs off the end of its input buffer, so the model uses
@@ -118,47 +71,3 @@ Three separate numbers, and conflating them loses information:
   truncated phase zero-padded into it, so the rotation converges on the truncated angle
   instead of quantising it a second time. Using N as the z width too would cap useful
   iterations at 13, since past that the atan entries round to zero.
-
-Measured NCO SFDR vs N, at an LO that exercises truncation:
-
-| N | measured | 6.02·N predicts |
-|---|---|---|
-| 10 | 59.8 dB | 60.2 |
-| 14 | 82.3 dB | 84.3 |
-| 18 | 93.5 dB | 108.4 |
-
-N=18 falls short of its bound because 16-bit amplitude quantisation dominates by then. N=14
-is well matched to a 16-bit datapath; widening N alone would not buy much without
-widening the datapath too.
-
-The binary-fraction trap: phase truncation only errs when the FCW has nonzero bits below
-the truncation point. The default 300 kHz / 2.4 MS/s LO gives `PHASE_INC = 0x20000000`,
-whose low 18 bits are zero, so it exercises no truncation and scores 93 dB — making N=14
-look free at any width. Tuned 98 Hz away, it scores 82 dB, the representative number.
-`cfg.phase_trunc_residue == 0` flags the flattering case, and `--report` prints both.
-
-### Sign conventions
-
-Two ways to get the mix backwards, with very different consequences:
-
-- Multiplying by the NCO instead of its conjugate up-converts — the tone lands at
-  2·f_lo + delta and the lowpass deletes it. Loud and obvious.
-- Negating Q yields conj(x·e^(−jθ)): the spectrum is mirrored about DC at full amplitude
-  and correct bandwidth. The magnitude spectrogram looks correct, and it stays invisible
-  until something downstream cares which sideband a feature came from.
-  `test_sign_convention_is_not_mirrored` checks for this.
-
-Later hardware check, unchanged: compare the custom CORDIC DDC against an SDR's own
-internal DDC output, to within quantisation tolerance.
-
-## Repository layout
-
-```
-cordic/     SystemVerilog RTL: cordic_core.sv and its testbench, run_sim.sh;
-            reference/ holds the numpy reference model + tests
-docs/       this README's datapath diagram
-build/      scratch: generated test vectors, Verilator build output. Gitignored.
-```
-
-Run from the repo root, e.g. `./cordic/run_sim.sh`,
-`python cordic/reference/test_ddc_reference.py`.

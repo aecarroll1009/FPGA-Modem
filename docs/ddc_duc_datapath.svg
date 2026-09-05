@@ -78,9 +78,10 @@
 
   <!-- TX box 2: Interpolating filter -->
   <rect x="325" y="300" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
-  <text x="415" y="333" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">Interpolating</text>
-  <text x="415" y="350" text-anchor="middle" font-size="11" fill="#173a68">filter</text>
-  <text x="415" y="367" text-anchor="middle" font-size="11" fill="#173a68">(not yet designed)</text>
+  <text x="415" y="326" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">Interpolating</text>
+  <text x="415" y="343" text-anchor="middle" font-size="11" fill="#173a68">filter</text>
+  <text x="415" y="360" text-anchor="middle" font-size="11" fill="#173a68">upsamples for TX,</text>
+  <text x="415" y="377" text-anchor="middle" font-size="11" fill="#173a68">ahead of CORDIC</text>
 
   <line x1="323" y1="345" x2="300" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
 
