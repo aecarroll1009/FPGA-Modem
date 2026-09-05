@@ -1,0 +1,24 @@
+# Timing constraints for rx_top.
+#
+# The clock target comes straight from the rate budget in the README: the
+# iterative CORDIC needs 19 clocks per sample, so 2.4 MS/s demands at least
+# 45.6 MHz. 50 MHz is the next round number up and is the stock oscillator on
+# every Cyclone V dev board, so it is the number to close against -- roughly
+# 10% margin over the requirement.
+
+create_clock -name clk -period 20.000 [get_ports clk]
+
+derive_clock_uncertainty
+
+# Asynchronous, held for many cycles at power-up.
+set_false_path -from [get_ports rst_n]
+
+# Static control: written once, then constant for the life of a capture.
+set_false_path -from [get_ports {phase_inc[*]}]
+
+# Egress is a stub (see rx/rx_top.sv). No PHY is chosen, so there is no real
+# I/O timing target yet and constraining these to invented numbers would only
+# manufacture false failures. This build measures the core datapath; replace
+# these with set_input_delay / set_output_delay when the link is picked.
+set_false_path -from [get_ports {in_valid adc_i[*] adc_q[*] out_ready}]
+set_false_path -to   [get_ports {in_ready out_valid out_overflow iq_i[*] iq_q[*]}]

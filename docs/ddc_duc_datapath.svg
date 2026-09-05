@@ -34,10 +34,10 @@
 
   <line x1="300" y1="195" x2="323" y2="195" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
 
-  <!-- RX box 2: Decimating FIR/CIC -->
+  <!-- RX box 2: Decimating FIR -->
   <rect x="325" y="150" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
   <text x="415" y="176" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">Decimating</text>
-  <text x="415" y="193" text-anchor="middle" font-size="11" fill="#173a68">FIR / CIC</text>
+  <text x="415" y="193" text-anchor="middle" font-size="11" fill="#173a68">63-tap FIR, ÷8</text>
   <text x="415" y="210" text-anchor="middle" font-size="11" fill="#173a68">1/K (K≈1.6467)</text>
   <text x="415" y="227" text-anchor="middle" font-size="11" fill="#173a68">folded into coeffs</text>
 

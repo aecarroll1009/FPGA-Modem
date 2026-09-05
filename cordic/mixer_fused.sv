@@ -45,9 +45,16 @@ module mixer_fused #(
     output logic signed [MIX_BITS-1:0]  mix_q
 );
 
-    // One guard bit is spent leaving headroom for the K growth (K > 1, so a
-    // full-scale input must not saturate on the CORDIC's first iteration);
-    // the rest widen data_bits up to the CORDIC's own datapath width.
+    // One guard bit is spent leaving headroom for the K growth (K > 1); the
+    // rest widen data_bits up to the CORDIC's own datapath width.
+    //
+    // That headroom is against the complex envelope, not the per-axis word.
+    // The rotation grows |v| monotonically to K*|v|, so it stays exact only
+    // while |xi + j*xq| <= (2**(CORDIC_BITS-1) - 1) / (K * 2**Guard), which at
+    // the default widths is ~1.21x full scale. A rotating tone sits at 1.0x
+    // and is safe; arbitrary IQ reaches sqrt(2) ~= 1.41x and clips inside the
+    // CORDIC's sat_add/sat_sub. That clipping is bit-exact against the
+    // reference model, so it is a backoff budget to respect, not a mismatch.
     localparam int Guard        = CORDIC_BITS - DATA_BITS - 1;
     localparam int ResidualBits = ANG_BITS - 2;
 
