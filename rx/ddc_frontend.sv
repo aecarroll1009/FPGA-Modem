@@ -56,7 +56,8 @@ module ddc_frontend #(
         .DATA_BITS   (DATA_BITS),
         .CORDIC_BITS (CORDIC_BITS),
         .MIX_BITS    (MIX_BITS),
-        .ANG_BITS    (ANG_BITS)
+        .ANG_BITS    (ANG_BITS),
+        .DOWNCONVERT (1'b1)
     ) u_mixer (
         .clk       (clk),
         .rst_n     (rst_n),

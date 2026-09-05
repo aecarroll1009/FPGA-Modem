@@ -5,7 +5,7 @@
 // `python cordic/reference/ddc_reference.py --mix-arch fused --emit-vectors
 // build/ddc_vectors`) through the DUT one at a time, using phase0=0 to match
 // the reference model's default, and compares mix_i/mix_q against the
-// reference's own fused-mixer output. Run via cordic/run_sim_ddc.sh, which
+// reference's own fused-mixer output. Run via rx/run_sim_ddc.sh, which
 // regenerates the vectors first so the RTL and the checked values can never
 // drift apart.
 //
