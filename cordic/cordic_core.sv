@@ -13,8 +13,8 @@
 // in the NCO and mixer wrappers that instantiate this core. Only truncating
 // (floor) shifts are implemented, matching the reference model's default.
 //
-// Reference model: hardware/reference/ddc_reference.py, cordic_rotate().
-// Verified bit-exact against it in hardware/cordic/tb_cordic_core.sv.
+// Reference model: cordic/reference/ddc_reference.py, cordic_rotate().
+// Verified bit-exact against it in cordic/tb_cordic_core.sv.
 
 `timescale 1ns/1ps
 `include "cordic_atan_table.svh"

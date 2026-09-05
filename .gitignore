@@ -1,5 +1,5 @@
 # build/ is the scratch area: generated CORDIC test vectors and Verilator
-# build output, both regenerable via hardware/cordic/run_sim.sh. Everything
+# build output, both regenerable via cordic/run_sim.sh. Everything
 # in it is ignored, but the directory itself is kept so it survives a clone.
 build/*
 !build/.gitkeep

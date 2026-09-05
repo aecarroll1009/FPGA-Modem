@@ -2,7 +2,7 @@
 # Regenerates the CORDIC test vectors and runs the self-checking testbench
 # under Verilator. Run from the repo root:
 #
-#   ./hardware/cordic/run_sim.sh
+#   ./cordic/run_sim.sh
 #
 # Requires Verilator with --binary support (5.x). If the installed version
 # is too old for --binary, replace the verilator invocation below with a
@@ -20,7 +20,7 @@ cd "$(git rev-parse --show-toplevel)"
 VEC_DIR="build/cordic_vectors"
 SIM_DIR="/tmp/fpga_modem_cordic_sim"
 
-python3 hardware/cordic/gen_cordic_vectors.py --out "$VEC_DIR"
+python3 cordic/gen_cordic_vectors.py --out "$VEC_DIR"
 
 NUM_VECTORS=$(python3 -c "import json; print(json.load(open('$VEC_DIR/manifest.json'))['n_vectors'])")
 
@@ -28,10 +28,10 @@ mkdir -p "$SIM_DIR"
 
 verilator --binary --timing -Wall \
     --top-module tb_cordic_core \
-    -Ihardware/cordic \
+    -Icordic \
     -GNUM_VECTORS="$NUM_VECTORS" \
-    hardware/cordic/cordic_core.sv \
-    hardware/cordic/tb_cordic_core.sv \
+    cordic/cordic_core.sv \
+    cordic/tb_cordic_core.sv \
     --Mdir "$SIM_DIR/obj_dir" \
     -o tb_cordic_core
 

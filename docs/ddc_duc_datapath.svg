@@ -1,0 +1,101 @@
+<svg viewBox="0 0 1200 460" width="1200" height="460" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333333"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="460" fill="#ffffff"/>
+
+  <text x="600" y="30" text-anchor="middle" font-size="22" font-weight="700" fill="#111111">FPGA SDR Modem — RX/TX CORDIC Datapath</text>
+  <text x="600" y="52" text-anchor="middle" font-size="13" fill="#555555" font-style="italic">Rotation-mode CORDIC front-end; demodulation and modulation happen off-chip in GNU Radio</text>
+
+  <!-- FPGA boundary -->
+  <rect x="20" y="75" width="610" height="345" rx="10" fill="#f2f6fc" stroke="#7f9cc4" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="35" y="98" font-size="13" font-weight="700" fill="#2c4a75">FPGA</text>
+
+  <!-- Host boundary -->
+  <rect x="650" y="75" width="530" height="345" rx="10" fill="#f7f4ec" stroke="#b79a55" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="665" y="98" font-size="13" font-weight="700" fill="#7a5f22">Host PC — GNU Radio (file-based)</text>
+
+  <!-- ============= RX SECTION ============= -->
+  <text x="35" y="132" font-size="14" font-weight="700" fill="#1d3557">RX — Digital Down-Converter (DDC)</text>
+
+  <!-- RX in port -->
+  <text x="28" y="199" font-size="12" fill="#333333">RF in</text>
+  <line x1="78" y1="195" x2="118" y2="195" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- RX box 1: CORDIC -->
+  <rect x="120" y="150" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
+  <text x="210" y="176" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">CORDIC</text>
+  <text x="210" y="193" text-anchor="middle" font-size="11" fill="#173a68">(rotation mode)</text>
+  <text x="210" y="210" text-anchor="middle" font-size="11" fill="#173a68">fused NCO + mixer</text>
+  <text x="210" y="227" text-anchor="middle" font-size="11" fill="#173a68">↓ down-convert</text>
+
+  <line x1="300" y1="195" x2="323" y2="195" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- RX box 2: Decimating FIR/CIC -->
+  <rect x="325" y="150" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
+  <text x="415" y="176" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">Decimating</text>
+  <text x="415" y="193" text-anchor="middle" font-size="11" fill="#173a68">FIR / CIC</text>
+  <text x="415" y="210" text-anchor="middle" font-size="11" fill="#173a68">1/K (K≈1.6467)</text>
+  <text x="415" y="227" text-anchor="middle" font-size="11" fill="#173a68">folded into coeffs</text>
+
+  <line x1="505" y1="195" x2="668" y2="195" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="586" y="184" text-anchor="middle" font-size="11" fill="#444444">baseband</text>
+  <text x="586" y="217" text-anchor="middle" font-size="11" fill="#444444">IQ</text>
+
+  <!-- RX host box: IQ file -->
+  <rect x="670" y="150" width="130" height="90" rx="8" fill="#f2ead2" stroke="#a9862f" stroke-width="1.5"/>
+  <text x="735" y="190" text-anchor="middle" font-size="12" font-weight="700" fill="#5c4813">IQ file</text>
+  <text x="735" y="207" text-anchor="middle" font-size="11" fill="#5c4813">(RX)</text>
+
+  <line x1="800" y1="195" x2="823" y2="195" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- RX host box: GNU Radio demod -->
+  <rect x="825" y="150" width="250" height="90" rx="8" fill="#f2ead2" stroke="#a9862f" stroke-width="1.5"/>
+  <text x="950" y="188" text-anchor="middle" font-size="13" font-weight="700" fill="#5c4813">GNU Radio flowgraph</text>
+  <text x="950" y="206" text-anchor="middle" font-size="11" fill="#5c4813">demodulation</text>
+
+  <!-- ============= TX SECTION ============= -->
+  <text x="35" y="282" font-size="14" font-weight="700" fill="#1d3557">TX — Digital Up-Converter (DUC)</text>
+
+  <!-- TX host box: GNU Radio mod -->
+  <rect x="825" y="300" width="250" height="90" rx="8" fill="#f2ead2" stroke="#a9862f" stroke-width="1.5"/>
+  <text x="950" y="338" text-anchor="middle" font-size="13" font-weight="700" fill="#5c4813">GNU Radio flowgraph</text>
+  <text x="950" y="356" text-anchor="middle" font-size="11" fill="#5c4813">modulation</text>
+
+  <line x1="823" y1="345" x2="800" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- TX host box: IQ file -->
+  <rect x="670" y="300" width="130" height="90" rx="8" fill="#f2ead2" stroke="#a9862f" stroke-width="1.5"/>
+  <text x="735" y="340" text-anchor="middle" font-size="12" font-weight="700" fill="#5c4813">IQ file</text>
+  <text x="735" y="357" text-anchor="middle" font-size="11" fill="#5c4813">(TX)</text>
+
+  <line x1="668" y1="345" x2="505" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="586" y="334" text-anchor="middle" font-size="11" fill="#444444">baseband</text>
+  <text x="586" y="367" text-anchor="middle" font-size="11" fill="#444444">IQ</text>
+
+  <!-- TX box 2: Interpolating filter -->
+  <rect x="325" y="300" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
+  <text x="415" y="333" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">Interpolating</text>
+  <text x="415" y="350" text-anchor="middle" font-size="11" fill="#173a68">filter</text>
+  <text x="415" y="367" text-anchor="middle" font-size="11" fill="#173a68">(not yet designed)</text>
+
+  <line x1="323" y1="345" x2="300" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- TX box 1: CORDIC -->
+  <rect x="120" y="300" width="180" height="90" rx="8" fill="#dce8fb" stroke="#3f6bb0" stroke-width="1.5"/>
+  <text x="210" y="326" text-anchor="middle" font-size="13" font-weight="700" fill="#173a68">CORDIC</text>
+  <text x="210" y="343" text-anchor="middle" font-size="11" fill="#173a68">(rotation mode)</text>
+  <text x="210" y="360" text-anchor="middle" font-size="11" fill="#173a68">fused mixer + NCO</text>
+  <text x="210" y="377" text-anchor="middle" font-size="11" fill="#173a68">↑ up-convert</text>
+
+  <line x1="118" y1="345" x2="78" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- TX out port -->
+  <text x="28" y="349" font-size="12" fill="#333333">RF out</text>
+
+  <!-- Footnote -->
+  <text x="600" y="443" text-anchor="middle" font-size="11.5" fill="#555555">The RX and TX CORDIC blocks are the same core (cordic/cordic_core.sv), time-shared between directions.</text>
+</svg>

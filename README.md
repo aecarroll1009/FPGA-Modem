@@ -1,7 +1,28 @@
-# hardware/
+# FPGA SDR Modem
 
-SystemVerilog for the DDC/DUC front-end described in `docs/PROJECT_SCOPE.md`, with the
-block diagram in `docs/cordic_ddc_nco_mixer_datapath.png`.
+An FPGA-based SDR modem built around a folded CORDIC front-end.
+
+**Architecture.** The receive side is a digital down-converter (DDC): a rotation-mode
+CORDIC combines the NCO and mixer into one block, down-converting the RF input to
+baseband, followed by a decimating CIC/FIR chain producing baseband IQ. The same CORDIC
+core runs in reverse as an up-converter (DUC) with an interpolating filter, so RX and TX
+share one front-end. An earlier version used a separate NCO, CORDIC, and complex mixer;
+folding them together removes the discrete complex multiplier entirely, at the cost of one
+extra output bit (see Design facts, below).
+
+**Demod/mod split.** Demodulation and modulation happen off the FPGA, in GNU Radio, via a
+file-based flowgraph. The FPGA's job is only the rate-critical front-end; baseband IQ is
+handed off to GNU Radio for the actual demod/mod work.
+
+**Status and sequencing.** Everything is developed and verified in simulation first; there
+is no physical board access right now. FPGA bring-up on a DE1-SoC, with a HackRF as the RF
+front-end, is a later step. The CORDIC core also targets an MPW tapeout.
+
+**Near-term deliverable.** The receive chain end-to-end in simulation — DDC producing an
+IQ file, consumed by a GNU Radio flowgraph for demod — verified against the reference
+model. The transmit path follows the same pattern once RX is solid.
+
+![RX/TX CORDIC datapath](docs/ddc_duc_datapath.svg)
 
 ## Build order
 
@@ -18,9 +39,9 @@ filter, once the DDC side is solid.
 `cordic/cordic_core.sv` — the shared iterative rotation-mode CORDIC engine both `nco/`
 and the fused mixer will instantiate. One iteration per clock, 16 cycles per rotation,
 saturating datapath matching the reference model's `sat()`. Verified bit-exact against
-`cordic_rotate()` across 267 vectors under Verilator (`hardware/cordic/run_sim.sh`),
-covering the quadrant-residual sweep both mixer architectures use, signal-like random
-inputs, and saturation edge cases.
+`cordic_rotate()` across 267 vectors under Verilator (`cordic/run_sim.sh`), covering the
+quadrant-residual sweep both mixer architectures use, signal-like random inputs, and
+saturation edge cases.
 
 `nco/`, `mixer/`, and `decim/` don't exist yet — `cordic_core.sv` is the first block
 built.
@@ -42,8 +63,8 @@ blocks, and ASIC, where multipliers are real area and power.
 
 ## Verification
 
-The numpy reference model is `reference/ddc_reference.py`, with 30 tests in
-`reference/test_ddc_reference.py` (`python hardware/reference/test_ddc_reference.py`).
+The numpy reference model is `cordic/reference/ddc_reference.py`, with 30 tests in
+`cordic/reference/test_ddc_reference.py` (`python cordic/reference/test_ddc_reference.py`).
 
 It is two models in one file. `ddc_ideal()` is float64, exact: what the answer should be.
 `DDC.run()` is bit-exact fixed point: what the RTL must produce. RTL is checked against
@@ -129,3 +150,15 @@ Two ways to get the mix backwards, with very different consequences:
 
 Later hardware check, unchanged: compare the custom CORDIC DDC against an SDR's own
 internal DDC output, to within quantisation tolerance.
+
+## Repository layout
+
+```
+cordic/     SystemVerilog RTL: cordic_core.sv and its testbench, run_sim.sh;
+            reference/ holds the numpy reference model + tests
+docs/       this README's datapath diagram
+build/      scratch: generated test vectors, Verilator build output. Gitignored.
+```
+
+Run from the repo root, e.g. `./cordic/run_sim.sh`,
+`python cordic/reference/test_ddc_reference.py`.

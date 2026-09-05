@@ -3,7 +3,7 @@
 Several tests construct a known failure case directly and confirm the
 corresponding check flags it, since a test that cannot fail is not evidence.
 
-Run:  python hardware/reference/test_ddc_reference.py
+Run:  python cordic/reference/test_ddc_reference.py
 """
 
 import json
@@ -15,7 +15,7 @@ import tempfile
 import numpy as np
 
 # --- repo layout bootstrap --------------------------------------------------
-# The reference model sits in hardware/reference/ next to this test; add its directory
+# The reference model sits in cordic/reference/ next to this test; add its directory
 # so the test runs from the repo root (the project-wide convention) as well as
 # from here.
 import os as _os
