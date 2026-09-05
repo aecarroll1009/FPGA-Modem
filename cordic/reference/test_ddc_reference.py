@@ -704,6 +704,43 @@ def test_vectors_round_trip():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_fused_vectors_round_trip_at_mix_bits():
+    """mix_i/mix_q must be hex-encoded at mix_bits, not data_bits.
+
+    mix_bits equals data_bits for the separate architecture, so a width bug
+    here is invisible to test_vectors_round_trip's default config. Encoding
+    a negative value at a narrower width than declared, then zero- rather
+    than sign-extending it back, flips it positive -- that only shows up
+    for the fused architecture, where mix_bits is one bit wider.
+    """
+    d = tempfile.mkdtemp(prefix="ddcvec_fused_")
+    try:
+        cfg = DDCConfig(mix_arch=MIX_FUSED)
+        ddc = DDC(cfg)
+        man = G.emit_vectors(ddc, d, n=1024)
+
+        xi, xq = G.two_tone(1024, cfg)
+        r = ddc.run(xi, xq)
+        assert np.any(r["mix_i"] < 0) and np.any(r["mix_q"] < 0), (
+            "stimulus produced no negative mix values -- test cannot catch the bug"
+        )
+
+        def read(name, bits):
+            with open(os.path.join(d, name)) as f:
+                vals = [int(line, 16) for line in f if line.strip()]
+            return np.array(
+                [v - (1 << bits) if v >= (1 << (bits - 1)) else v for v in vals], np.int64
+            )
+
+        for name, arr in (("mix_i.hex", r["mix_i"]), ("mix_q.hex", r["mix_q"])):
+            back = read(name, cfg.mix_bits)
+            assert np.array_equal(back, arr), f"{name} did not round-trip at mix_bits"
+
+        print("fused mix_i/mix_q round-trip at mix_bits, not data_bits, OK")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_negative_values_encode_as_twos_complement():
     assert G._hex_lines(np.array([-1], np.int64), 16) == ["ffff"]
     assert G._hex_lines(np.array([-32768], np.int64), 16) == ["8000"]
@@ -749,6 +786,7 @@ def main():
     test_angle_word_zero_pads_rather_than_requantising()
 
     test_vectors_round_trip()
+    test_fused_vectors_round_trip_at_mix_bits()
     test_negative_values_encode_as_twos_complement()
     print("\nALL TESTS PASSED")
 
