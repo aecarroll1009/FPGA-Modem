@@ -124,7 +124,7 @@ costs 32 flip-flops — deliberately not spent, since area is what binds here.
 
 ## Verification
 
-The numpy reference model is `cordic/reference/ddc_reference.py`, with 30 tests in
+The numpy reference model is `cordic/reference/ddc_reference.py`, with 35 tests in
 `cordic/reference/test_ddc_reference.py` (`python cordic/reference/test_ddc_reference.py`).
 
 It is two models in one file. `ddc_ideal()` is float64, exact: what the answer should be.

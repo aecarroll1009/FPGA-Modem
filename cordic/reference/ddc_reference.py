@@ -62,12 +62,26 @@ def sat(x, bits: int):
     return np.clip(np.asarray(x, dtype=np.int64), lo, hi)
 
 
-def would_saturate(x, bits: int) -> int:
-    """Count how many elements sat() would clip."""
+def saturation_mask(x, bits: int):
+    """Boolean mask of the elements sat() would clip.
+
+    Args:
+        x: Values to test.
+        bits: Target word width.
+
+    Returns:
+        A boolean array, True where the value is outside the representable
+        range.
+    """
     lo = -(1 << (bits - 1))
     hi = (1 << (bits - 1)) - 1
     a = np.asarray(x, dtype=np.int64)
-    return int(np.count_nonzero((a < lo) | (a > hi)))
+    return (a < lo) | (a > hi)
+
+
+def would_saturate(x, bits: int) -> int:
+    """Count how many elements sat() would clip."""
+    return int(np.count_nonzero(saturation_mask(x, bits)))
 
 
 def assert_fits(x, name: str, bits: int = 62) -> None:
@@ -147,6 +161,12 @@ def cordic_rotate(x, y, z, table: np.ndarray, width: int, shift_mode: str = TRUN
     Rotates (x, y) by angle z, scaling the result by K. Pass z0=-theta to
     rotate by -theta.
 
+    The rotation grows the vector's magnitude monotonically toward K*|v|, so a
+    vector that starts inside the datapath can still clip partway through. That
+    clipping is counted and returned rather than left silent: it is the failure
+    mode a caller most needs to know about, and it is invisible from the output
+    alone.
+
     Args:
         x, y: Initial vector components, at `width` bits.
         z: Initial angle, in the same LSB units as `table`.
@@ -155,21 +175,35 @@ def cordic_rotate(x, y, z, table: np.ndarray, width: int, shift_mode: str = TRUN
         shift_mode: TRUNC or ROUND, for the per-iteration shifts.
 
     Returns:
-        The rotated (x, y) and the residual angle z after all iterations.
+        The rotated (x, y), the residual angle z after all iterations, and the
+        number of *samples* that clipped anywhere in the rotation.
     """
     n_iter = len(table)
+    x = np.asarray(x, dtype=np.int64)
+    y = np.asarray(y, dtype=np.int64)
+    z = np.asarray(z, dtype=np.int64)
+
+    # One flag per sample, not per event. A sample that clips on twelve
+    # consecutive iterations is still one clipped sample, and this count is
+    # summed with fir_decimate's, which counts elements -- so the two have to
+    # be in the same unit or the total means nothing.
+    clipped = saturation_mask(x, width) | saturation_mask(y, width)
     x = sat(x, width)
     y = sat(y, width)
-    z = np.asarray(z, dtype=np.int64)
+
     for i in range(n_iter):
         d = np.where(z < 0, np.int64(-1), np.int64(1))
         xs = shr(x, i, shift_mode)
         ys = shr(y, i, shift_mode)
-        xn = sat(x - d * ys, width)
-        yn = sat(y + d * xs, width)
+        xn_raw = x - d * ys
+        yn_raw = y + d * xs
+        clipped = clipped | saturation_mask(xn_raw, width) | saturation_mask(
+            yn_raw, width
+        )
+        x = sat(xn_raw, width)
+        y = sat(yn_raw, width)
         z = z - d * table[i]
-        x, y = xn, yn
-    return x, y, z
+    return x, y, z, int(np.count_nonzero(clipped))
 
 
 def quadrant_split(phase, ang_bits: int):
@@ -283,13 +317,33 @@ def fir_taps_quantized(
     target_dc = (1.0 / k_gain) if fold_inv_k else 1.0
     scale = full_scale(coef_bits)
     q = np.round(h * target_dc * scale).astype(np.int64)
+    want = int(round(target_dc * scale))
+    q[int(np.argmax(np.abs(q)))] += want - int(q.sum())
+
+    # Checked after the residue correction, not before: the correction lands on
+    # the largest tap, so it is exactly the step most likely to push one out of
+    # range, and clipping it in sat() below would silently lose the DC gain the
+    # correction exists to make exact.
     if would_saturate(q, coef_bits):
         raise ValueError(
             f"coefficients overflow {coef_bits} bits; widen coef_bits or lower the gain"
         )
-    want = int(round(target_dc * scale))
-    q[int(np.argmax(np.abs(q)))] += want - int(q.sum())
-    return sat(q, coef_bits)
+    q = sat(q, coef_bits)
+
+    # The residue correction above lands on the largest tap, which for a
+    # windowed lowpass is the centre one -- and a centre tap is its own mirror,
+    # so symmetry survives. That is a property of this filter shape, not a
+    # guarantee: at narrow coef_bits the argmax can move off centre and quietly
+    # cost the exact linear phase firwin_lowpass went out of its way to build
+    # (and break any symmetric-folding FIR in RTL, which assumes h[k]==h[N-1-k]).
+    if np.allclose(h, h[::-1]) and not np.array_equal(q, q[::-1]):
+        raise ValueError(
+            f"quantizing to {coef_bits} bits broke the taps' symmetry, so the "
+            f"filter is no longer linear phase: the rounding residue landed on "
+            f"tap {int(np.argmax(np.abs(q)))} rather than the centre tap "
+            f"{(len(q) - 1) // 2}. Widen coef_bits."
+        )
+    return q
 
 
 def fir_decimate(xi, xq, coef, decim, coef_bits, acc_bits, out_bits, shift_mode):
@@ -453,7 +507,10 @@ class DDCConfig:
     acc_bits: int = 40
     out_bits: int = 16
 
-    mix_arch: str = MIX_SEPARATE
+    # Defaults to fused because that is what the RTL implements. Emitting
+    # vectors under the separate architecture would produce a set the RTL
+    # cannot match, differing in both mix_bits and the coefficients.
+    mix_arch: str = MIX_FUSED
     shift_mode: str = TRUNC
 
     def __post_init__(self):
@@ -600,7 +657,15 @@ class DDC:
         q, rem = quadrant_split(self.angle_word(phase), c.ang_bits)
         x0 = np.full(rem.shape, int(round(full_scale(c.cordic_bits) / c.k_gain)), np.int64)
         y0 = np.zeros(rem.shape, np.int64)
-        x, y, _ = cordic_rotate(x0, y0, rem, self.atan, c.cordic_bits, c.shift_mode)
+        # The seed is round(full_scale/K), so the K growth lands on full_scale
+        # -- one LSB above the largest representable value. At the extreme ends
+        # of the residual range (about ten of 32768 residuals) the result does
+        # therefore clip, by exactly that one LSB. The count is discarded rather
+        # than propagated because the clip is invisible downstream: shifting
+        # down to data_bits maps both full_scale and full_scale-1 to the same
+        # saturated output. Reporting it would make n_saturated fire on half of
+        # all NCO samples for a benign off-by-one.
+        x, y, _, _ = cordic_rotate(x0, y0, rem, self.atan, c.cordic_bits, c.shift_mode)
         cos, sin = apply_quadrant_sincos(q, x, y)
         sh = c.cordic_bits - c.data_bits
         return sat(shr(cos, sh, c.shift_mode), c.data_bits), sat(
@@ -650,15 +715,20 @@ class DDC:
         c = self.cfg
         q, rem = quadrant_split(self.angle_word(phase), c.ang_bits)
         ri, rq = prerotate_conj(q, np.asarray(xi, np.int64), np.asarray(xq, np.int64))
-        # Leaves one guard bit for the K growth, so a full-scale input does
-        # not saturate on the first iteration.
+        # One guard bit for the K growth. The headroom this buys is against the
+        # complex envelope, not the per-axis word: the rotation is exact only
+        # while |xi + j*xq| <= 2/K ~= 1.21 x full scale, and arbitrary IQ can
+        # reach sqrt(2). Clipping past that happens *inside* the rotation, so
+        # the count comes back from cordic_rotate. Checking only the seeding,
+        # as this used to, reports zero while the band is being corrupted --
+        # and could not have reported anything anyway, since g leaves the
+        # seeded value a factor of two inside cordic_bits by construction.
         g = c.cordic_bits - c.data_bits - 1
-        n_pre = would_saturate(ri << np.int64(g), c.cordic_bits)
-        x, y, _ = cordic_rotate(
+        x, y, _, n_rot = cordic_rotate(
             ri << np.int64(g), rq << np.int64(g), -rem, self.atan,
             c.cordic_bits, c.shift_mode,
         )
-        self._fused_sat = n_pre
+        self._fused_sat = n_rot
         return sat(shr(x, g, c.shift_mode), c.mix_bits), sat(
             shr(y, g, c.shift_mode), c.mix_bits
         )
@@ -1062,16 +1132,25 @@ def _measure_ddc_quality(ddc: DDC, cfg: DDCConfig, n: int) -> dict:
     Returns:
         A dict with ddc_snr_db, ddc_enob, ddc_sfdr_db, and n_saturated.
     """
+    # Normalised by data_bits, not out_bits. The FIR's coefficients carry a DC
+    # gain of 1 (with 1/K folded in for the fused mixer), so the output lands
+    # back at *input* scale regardless of how wide the output word is. Dividing
+    # by full_scale(out_bits) instead would make any out_bits != data_bits
+    # config report a scale mismatch as if it were datapath error -- at
+    # data_bits=14, out_bits=16 that reads 2.5 dB for output which is in fact
+    # bit-identical to the out_bits=14 case and scores 67.4 dB.
+    scale = full_scale(cfg.data_bits)
+
     xi, xq = two_tone(n, cfg)
     r = ddc.run(xi, xq)
     ref = ddc_ideal(xi, xq, cfg, ddc.h_float)
-    fixed = (r["out_i"] + 1j * r["out_q"]).astype(complex) / full_scale(cfg.out_bits)
+    fixed = (r["out_i"] + 1j * r["out_q"]).astype(complex) / scale
 
     # SFDR needs a single tone, measured separately at an offset away from
     # DC and the band edge.
     si, sq = tone(n, cfg.fs_in, cfg.f_lo_actual + 37_000.0, -6.0, cfg.data_bits)
     rs = ddc.run(si, sq)
-    single = (rs["out_i"] + 1j * rs["out_q"]).astype(complex) / full_scale(cfg.out_bits)
+    single = (rs["out_i"] + 1j * rs["out_q"]).astype(complex) / scale
 
     skip = 0
     snr = snr_db(ref, fixed, skip)
@@ -1203,7 +1282,8 @@ def main(argv=None) -> int:
                    help="run separate and fused side by side (the synthesis study's premise)")
     p.add_argument("--emit-vectors", metavar="DIR", help="write RTL test vectors to DIR")
     p.add_argument("--n", type=int, default=8192, help="stimulus length in samples")
-    p.add_argument("--mix-arch", choices=(MIX_SEPARATE, MIX_FUSED), default=MIX_SEPARATE)
+    p.add_argument("--mix-arch", choices=(MIX_SEPARATE, MIX_FUSED),
+                   default=DDCConfig.mix_arch)
     p.add_argument("--shift-mode", choices=(TRUNC, ROUND), default=TRUNC)
     p.add_argument("--n-iter", type=int, default=DDCConfig.n_iter)
     p.add_argument("--data-bits", type=int, default=DDCConfig.data_bits)
@@ -1214,9 +1294,9 @@ def main(argv=None) -> int:
                    help="N: phase bits reaching the angle path, sets spur floor")
     p.add_argument("--ang-bits", type=int, default=DDCConfig.ang_bits,
                    help="CORDIC internal angle width")
-    p.add_argument("--out-bits", type=int, default=DDCConfig.out_bits,
-                   help="output word width; keep in step with --data-bits or "
-                        "the SNR figure is measuring a scale mismatch")
+    p.add_argument("--out-bits", type=int, default=None,
+                   help="output word width; defaults to --data-bits, which is "
+                        "where the FIR's unity DC gain puts the output anyway")
     p.add_argument("--fs-in", type=float, default=DDCConfig.fs_in)
     p.add_argument("--f-lo", type=float, default=DDCConfig.f_lo)
     p.add_argument("--decim", type=int, default=DDCConfig.decim)
@@ -1228,7 +1308,8 @@ def main(argv=None) -> int:
             mix_arch=a.mix_arch, shift_mode=a.shift_mode, n_iter=a.n_iter,
             data_bits=a.data_bits, cordic_bits=a.cordic_bits,
             phase_bits=a.phase_bits, phase_trunc_bits=a.phase_trunc_bits,
-            ang_bits=a.ang_bits, out_bits=a.out_bits,
+            ang_bits=a.ang_bits,
+            out_bits=a.data_bits if a.out_bits is None else a.out_bits,
         )
     except (ValueError, OverflowError) as e:
         print(f"error: {e}", file=sys.stderr)

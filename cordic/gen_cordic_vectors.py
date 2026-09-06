@@ -155,7 +155,7 @@ def compute_expected(cases):
     x0 = np.array([c[0] for c in cases], dtype=np.int64)
     y0 = np.array([c[1] for c in cases], dtype=np.int64)
     z0 = np.array([c[2] for c in cases], dtype=np.int64)
-    x, y, z = G.cordic_rotate(x0, y0, z0, table, WIDTH, G.TRUNC)
+    x, y, z, _ = G.cordic_rotate(x0, y0, z0, table, WIDTH, G.TRUNC)
     return list(zip((int(v) for v in x), (int(v) for v in y), (int(v) for v in z)))
 
 

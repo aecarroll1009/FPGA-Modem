@@ -129,7 +129,7 @@ def test_cordic_converges_at_the_range_reduction_boundary():
     quarter = 1 << (cfg.ang_bits - 2)
     z0 = np.array([0, 1, quarter // 2, quarter - 2, quarter - 1], np.int64)
     x0 = np.full(z0.shape, int(round(G.full_scale(cfg.cordic_bits) / cfg.k_gain)), np.int64)
-    x, y, z = G.cordic_rotate(x0, np.zeros_like(z0), z0, tbl, cfg.cordic_bits)
+    x, y, z, _ = G.cordic_rotate(x0, np.zeros_like(z0), z0, tbl, cfg.cordic_bits)
     # The residual cannot go below the last rotation step -- that is the
     # finest correction the CORDIC has left. Asserting a tighter bound than
     # the algorithm can reach would just be a test tuned to today's numbers,
@@ -165,7 +165,7 @@ def test_nco_amplitude_is_unit_because_of_the_inv_k_seed():
     q, rem = G.quadrant_split(ddc.angle_word(phase), cfg.ang_bits)
     half = G.full_scale(cfg.cordic_bits) // 2
     x0 = np.full(rem.shape, half, np.int64)
-    x, y, _ = G.cordic_rotate(x0, np.zeros_like(rem), rem, tbl, cfg.cordic_bits)
+    x, y, _, _ = G.cordic_rotate(x0, np.zeros_like(rem), rem, tbl, cfg.cordic_bits)
     assert G.would_saturate(np.hypot(x, y).astype(np.int64), cfg.cordic_bits) == 0
     bad = np.hypot(x, y) / half
     assert abs(bad.mean() - cfg.k_gain) < 5e-3, (
@@ -258,7 +258,11 @@ def test_mirrored_mixer_is_detected():
     The mirrored output must match the correct one in amplitude and land on
     the opposite side of the carrier.
     """
-    cfg = DDCConfig()
+    # Pinned to the separate architecture because _mix_mirrored implements the
+    # separate mixer's cos/sin multiplies. Comparing it against the fused
+    # default would put a stray factor of K between the two paths and the
+    # amplitude check below would be measuring the gain, not the mirroring.
+    cfg = DDCConfig(mix_arch=MIX_SEPARATE)
     ddc = DDC(cfg)
     n = 8192
     delta = 40_000.0
@@ -406,7 +410,7 @@ def test_wrong_rotation_direction_in_fused_is_caught():
     ri, rq = G.prerotate_conj(q, xi, xq)
     g = cfg.cordic_bits - cfg.data_bits - 1
     # Seed with +rem instead of -rem to reverse the rotation direction.
-    x, y, _ = G.cordic_rotate(
+    x, y, _, _ = G.cordic_rotate(
         ri << np.int64(g), rq << np.int64(g), rem, ddc.atan, cfg.cordic_bits, cfg.shift_mode
     )
     mi = G.sat(G.shr(x, g), cfg.mix_bits)
@@ -747,6 +751,128 @@ def test_fused_vectors_round_trip_at_mix_bits():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_clipping_inside_the_rotation_is_counted():
+    """A vector that starts in range can still clip mid-rotation.
+
+    The magnitude grows monotonically toward K*|v|, so the seeding check alone
+    reports zero while the band is being corrupted. Drives a complex envelope
+    past the 2/K limit and confirms the count comes back non-zero.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    fs = G.full_scale(cfg.data_bits)
+    n = 256
+
+    # I and Q both at full scale: |v| = sqrt(2) x FS, past the 2/K ~= 1.21 x
+    # limit. Every individual component is still inside data_bits, so nothing
+    # is detectable at the input -- the clip happens partway through the
+    # rotation, once K has grown the vector onto an axis.
+    xi = np.full(n, fs - 1, np.int64)
+    xq = np.full(n, fs - 1, np.int64)
+    g = cfg.cordic_bits - cfg.data_bits - 1
+    assert G.would_saturate(np.array([(fs - 1) << g], np.int64), cfg.cordic_bits) == 0, (
+        "the seeded value must be in range, or this test would be exercising "
+        "input overflow rather than the mid-rotation path it claims to"
+    )
+
+    ddc.mix_fused(xi, xq, ddc.phase(n))
+    assert ddc._fused_sat > 0, (
+        "a sqrt(2) x full-scale envelope clips inside the CORDIC but was "
+        "reported as zero saturations"
+    )
+    # Counted per sample, not per iteration: a sample clipping on many
+    # iterations must not inflate the total past the number of samples, or it
+    # cannot be summed with fir_decimate's count.
+    assert ddc._fused_sat <= n, (
+        f"{ddc._fused_sat} clips reported for {n} samples -- the count is "
+        f"per-iteration events, not samples, and is no longer comparable with "
+        f"fir_decimate's"
+    )
+
+    # And a rotating tone, which sits at exactly 1.0 x full scale, does not.
+    ti, tq = G.tone(n, cfg.fs_in, cfg.f_lo_actual + 11_000.0, 0.0, cfg.data_bits)
+    ddc.mix_fused(ti, tq, ddc.phase(n))
+    assert ddc._fused_sat == 0, (
+        f"a full-scale rotating tone is inside the 1.21 x limit and must not "
+        f"clip, but {ddc._fused_sat} saturations were counted"
+    )
+    print("mid-rotation clipping counted per sample; full-scale tone clean OK")
+
+
+def test_quantization_that_breaks_linear_phase_is_rejected():
+    """firwin_lowpass builds exact symmetry; the residue fixup can destroy it."""
+    cfg = DDCConfig()
+    h = G.firwin_lowpass(cfg.n_taps, cfg.fir_cutoff / (cfg.fs_in / 2))
+
+    # Wide enough that the residue lands on the centre tap: symmetry survives.
+    q = G.fir_taps_quantized(h, 16, True, cfg.k_gain)
+    assert np.array_equal(q, q[::-1]), "16-bit taps should still be symmetric"
+
+    # Narrow enough that the argmax moves off centre and symmetry breaks. If
+    # this stops raising, the guard has gone vacuous.
+    try:
+        G.fir_taps_quantized(h, 10, True, cfg.k_gain)
+        raised = False
+    except ValueError as e:
+        raised = "linear phase" in str(e)
+    assert raised, (
+        "quantizing to 10 bits breaks tap symmetry and must be rejected, not "
+        "silently returned as a filter that is no longer linear phase"
+    )
+    print("linear-phase-breaking quantization rejected OK")
+
+
+def test_snr_is_measured_at_data_scale_not_out_bits():
+    """The FIR's unity DC gain returns the output to input scale.
+
+    So the SNR metric must normalise by data_bits. Normalising by out_bits
+    instead reports a pure scale mismatch as if it were datapath error: at
+    data_bits=14, out_bits=16 it read 2.5 dB for output that is bit-identical
+    to the out_bits=14 case.
+    """
+    # A wider output word changes nothing about the samples themselves...
+    narrow = DDC(DDCConfig(data_bits=14, out_bits=14))
+    wide = DDC(DDCConfig(data_bits=14, out_bits=16))
+    xi, xq = G.tone(2048, narrow.cfg.fs_in, narrow.cfg.f_lo_actual + 37_000.0,
+                    -6.0, narrow.cfg.data_bits)
+    rn, rw = narrow.run(xi, xq), wide.run(xi, xq)
+    assert np.array_equal(rn["out_i"], rw["out_i"]), (
+        "widening out_bits changed the output samples; then the scale argument "
+        "below does not hold and this test is checking the wrong thing"
+    )
+
+    # ...so it must not change the score either.
+    a = G.report(DDCConfig(data_bits=14, out_bits=14), n=4096)["ddc_snr_db"]
+    b = G.report(DDCConfig(data_bits=14, out_bits=16), n=4096)["ddc_snr_db"]
+    assert abs(a - b) < 0.01, (
+        f"identical output scored {a:.2f} dB at out_bits=14 but {b:.2f} dB at "
+        f"out_bits=16 -- the metric is normalising by the word width instead of "
+        f"the signal's actual scale"
+    )
+
+    # And narrowing data_bits, which is a real loss, still costs ~6 dB a bit.
+    snr = [G.report(DDCConfig(data_bits=w, out_bits=w), n=4096)["ddc_snr_db"]
+           for w in (16, 14, 12)]
+    assert snr[0] > snr[1] > snr[2], f"SNR should fall with data_bits: {snr}"
+    for hi, lo in zip(snr, snr[1:]):
+        assert 8.0 < hi - lo < 16.0, (
+            f"two bits should cost roughly 12 dB, got {hi - lo:.1f} dB"
+        )
+    print(f"SNR normalised at data scale; {snr[0]:.1f}/{snr[1]:.1f}/{snr[2]:.1f} dB "
+          f"across 16/14/12 bits OK")
+
+
+def test_default_architecture_is_the_one_the_rtl_implements():
+    """Emitting vectors under the wrong arch yields a set the RTL cannot match."""
+    assert DDCConfig().mix_arch == MIX_FUSED
+    # The two really are incompatible, so the default is load-bearing.
+    assert DDCConfig(mix_arch=MIX_SEPARATE).mix_bits != DDCConfig().mix_bits
+    assert not np.array_equal(
+        DDC(DDCConfig(mix_arch=MIX_SEPARATE)).coef, DDC(DDCConfig()).coef
+    )
+    print("default mix_arch is fused, matching the RTL OK")
+
+
 def test_negative_values_encode_as_twos_complement():
     assert G._hex_lines(np.array([-1], np.int64), 16) == ["ffff"]
     assert G._hex_lines(np.array([-32768], np.int64), 16) == ["8000"]
@@ -790,6 +916,11 @@ def main():
     test_phase_truncation_only_bites_when_the_fcw_exercises_it()
     test_widening_n_improves_spectral_purity()
     test_angle_word_zero_pads_rather_than_requantising()
+
+    test_clipping_inside_the_rotation_is_counted()
+    test_quantization_that_breaks_linear_phase_is_rejected()
+    test_snr_is_measured_at_data_scale_not_out_bits()
+    test_default_architecture_is_the_one_the_rtl_implements()
 
     test_vectors_round_trip()
     test_fused_vectors_round_trip_at_mix_bits()
