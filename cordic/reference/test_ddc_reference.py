@@ -340,8 +340,8 @@ def test_k_folded_the_wrong_way_is_4_3_db_hot():
     """Measure the level error from folding K instead of 1/K into the FIR."""
     cfg = DDCConfig(mix_arch=MIX_FUSED)
     h = G.firwin_lowpass(cfg.n_taps, cfg.fir_cutoff / (cfg.fs_in / 2))
-    right = G.fir_taps_quantized(h, cfg.coef_bits, True, cfg.k_gain)
-    wrong = G.fir_taps_quantized(h, cfg.coef_bits, False, cfg.k_gain)
+    right = G.fir_taps_quantized(h, cfg.coef_bits, 1.0 / cfg.k_gain)
+    wrong = G.fir_taps_quantized(h, cfg.coef_bits, 1.0)
     db = 20 * math.log10(wrong.sum() / right.sum())
     assert 4.2 < db < 4.4, f"expected ~4.34 dB error, got {db}"
     print(f"K folded the wrong way = {db:+.2f} dB level error OK")
@@ -552,6 +552,220 @@ def test_separate_mixer_refuses_to_upconvert():
         print("separate mixer refuses to up-convert OK")
         return
     raise AssertionError("mix_arch='separate' silently accepted downconvert=False")
+
+
+# --------------------------------------------------------------------------
+# TX interpolator
+# --------------------------------------------------------------------------
+
+
+def test_interpolator_targets_decim_over_k_gain():
+    """The interpolator's DC gain must restore decim's attenuation, not just 1/K.
+
+    Zero-stuffing by `decim` cuts the average amplitude by 1/decim on its
+    own; the interpolator's filter has to put that back on top of
+    pre-cancelling the mixer's K, or the TX chain comes out `decim` times too
+    quiet. Paired with the wrong-gain case (using the decimator's own
+    target_dc, 1/K, with no decim factor) so a low-effort answer -- reusing
+    fir_decimate's coefficients wholesale -- is caught, not just described.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+
+    dc_interp = ddc.coef_interp.sum() / G.full_scale(cfg.coef_bits)
+    assert abs(dc_interp - cfg.decim / cfg.k_gain) < 1e-3, (
+        f"interpolator DC gain {dc_interp} should be decim/K = {cfg.decim / cfg.k_gain:.4f}"
+    )
+
+    wrong = G.fir_taps_quantized(ddc.h_float, cfg.coef_bits, 1.0 / cfg.k_gain)
+    ratio = ddc.coef_interp.sum() / wrong.sum()
+    assert abs(ratio - cfg.decim) < 1e-2, (
+        f"reusing the decimator's 1/K coefficients wholesale should be decim="
+        f"{cfg.decim}x too quiet, measured {ratio:.3f}x -- if this drifted to "
+        f"~1x the two coefficient sets stopped being distinguishable"
+    )
+    print(f"interpolator DC gain {dc_interp:.4f} = decim/K OK ({ratio:.2f}x the RX-only gain)")
+
+
+def test_polyphase_decomposition_matches_zero_stuffed_convolution():
+    """The RTL's polyphase realization must equal fir_interpolate()'s reference term for term.
+
+    fir_interpolate() zero-stuffs and convolves -- correct but wasteful,
+    since interp-1 out of every interp multiplies are against a known zero.
+    The RTL instead runs each phase directly against the un-stuffed input
+    history. These are mathematically identical, not merely close, so this
+    builds the direct-polyphase answer by hand and checks it bit-for-bit
+    against fir_interpolate()'s output before trusting the RTL against
+    either one.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    n = 300
+    rng = np.random.default_rng(1)
+    xi = rng.integers(-G.full_scale(cfg.data_bits), G.full_scale(cfg.data_bits), n)
+    xq = rng.integers(-G.full_scale(cfg.data_bits), G.full_scale(cfg.data_bits), n)
+
+    ii, iq, _ = G.fir_interpolate(
+        xi, xq, ddc.coef_interp, cfg.decim, cfg.coef_bits, cfg.acc_bits,
+        cfg.data_bits, cfg.shift_mode,
+    )
+    assert len(ii) == n * cfg.decim, "fir_interpolate should return one output per zero-stuffed sample"
+
+    phases = G.polyphase_decompose(ddc.coef_interp, cfg.decim)
+    lengths = [len(idxs) for idxs in phases]
+    assert max(lengths) - min(lengths) == 1 and lengths.count(min(lengths)) == 1, (
+        f"n_taps={cfg.n_taps} is not a multiple of decim={cfg.decim}, so exactly "
+        f"one phase should be uneven by one tap -- this pins that shape so the "
+        f"RTL's per-phase tap-count table cannot silently assume they are equal"
+    )
+
+    # Direct polyphase: y[n*interp+p] = sum_k coef_interp[phase[p][k]] * x[n-k],
+    # x[negative] = 0 -- the same causal, zero-history convention
+    # fir_interpolate() now uses, so no alignment offset is needed here.
+    poly_i = np.zeros_like(ii)
+    poly_q = np.zeros_like(iq)
+    for m in range(len(ii)):
+        n_idx, p = divmod(m, cfg.decim)
+        acc_i = 0
+        acc_q = 0
+        for k, coef_idx in enumerate(phases[p]):
+            src = n_idx - k
+            if src < 0:
+                continue
+            acc_i += int(ddc.coef_interp[coef_idx]) * int(xi[src])
+            acc_q += int(ddc.coef_interp[coef_idx]) * int(xq[src])
+        poly_i[m] = G.sat(G.shr(acc_i, cfg.coef_bits - 1, cfg.shift_mode), cfg.data_bits)
+        poly_q[m] = G.sat(G.shr(acc_q, cfg.coef_bits - 1, cfg.shift_mode), cfg.data_bits)
+
+    assert np.array_equal(poly_i, ii), "polyphase I does not match the zero-stuffed reference"
+    assert np.array_equal(poly_q, iq), "polyphase Q does not match the zero-stuffed reference"
+    print(f"polyphase decomposition matches zero-stuffed convolution bit-for-bit ({len(ii)} samples) OK")
+
+
+def test_interpolate_then_decimate_round_trip():
+    """Interpolating then decimating the same signal should approximately return it.
+
+    A strong, cheap correctness signal that does not depend on the mixer at
+    all: if the interpolator's gain or filtering were wrong, this would not
+    close to a clean single complex gain times the input, regardless of the
+    exact expected scale (which includes both filters' passband gain and is
+    not 1.0 on its own -- see the mixer-inclusive round trip below for the
+    unity-gain version).
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    n = 2048
+    xi, xq = G.tone(n, cfg.fs_out, 40_000.0, -6.0, cfg.data_bits)
+
+    ii, iq, n_sat_i = G.fir_interpolate(
+        xi, xq, ddc.coef_interp, cfg.decim, cfg.coef_bits, cfg.acc_bits,
+        cfg.data_bits, cfg.shift_mode,
+    )
+    assert n_sat_i == 0, f"unexpected clipping in the interpolator: {n_sat_i}"
+    yi, yq, n_sat_d = G.fir_decimate(
+        ii, iq, ddc.coef, cfg.decim, cfg.coef_bits, cfg.acc_bits, cfg.out_bits, cfg.shift_mode
+    )
+    assert n_sat_d == 0, f"unexpected clipping in the decimator: {n_sat_d}"
+
+    fs = G.full_scale(cfg.data_bits)
+    a = (xi.astype(float) + 1j * xq.astype(float)) / fs
+    b = (yi.astype(float) + 1j * yq.astype(float)) / fs
+    snr = _best_delay_snr(a, b, max_offset=30)
+    assert snr > 50, f"interpolate-then-decimate round trip only scored {snr:.1f} dB"
+    print(f"interpolate-then-decimate round trip: {snr:.1f} dB OK")
+
+
+def test_tx_then_rx_round_trip():
+    """The full TX chain into the full RX chain should recover the original baseband signal.
+
+    The end-to-end check that matters: TX interpolates and up-converts,
+    the result stands in for an RF-rate signal, and RX down-converts and
+    decimates it. This is the only test exercising the interpolator, the
+    up-convert mixer, the down-convert mixer, and the decimator together --
+    exactly the two K factors (mixer-introduces-K on TX, mixer-removes-K on
+    RX) and the decim factor (interpolator adds it, decimator's own 1/K does
+    not remove it a second time) have to net out to a clean unity-gain
+    passthrough, or a wrong sign or factor anywhere in the chain shows up
+    here even if it happened to cancel in a narrower test.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    n = 4096
+    xi, xq = G.tone(n, cfg.fs_out, 40_000.0, -6.0, cfg.data_bits)
+
+    tx = ddc.tx_stage(xi, xq)
+    assert tx["n_saturated"] == 0, f"unexpected clipping in the TX chain: {tx['n_saturated']}"
+
+    # Stand-in for an ADC capturing the upconverted RF signal: mix_bits is
+    # one bit wider than data_bits (the fused mixer's K headroom), so this
+    # truncates back down, same as a real ADC would only ever see data_bits.
+    rf_i = G.sat(tx["mix_i"], cfg.data_bits)
+    rf_q = G.sat(tx["mix_q"], cfg.data_bits)
+    rx = ddc.run(rf_i, rf_q)
+    assert rx["n_saturated"] == 0, f"unexpected clipping in the RX chain: {rx['n_saturated']}"
+
+    fs = G.full_scale(cfg.data_bits)
+    a = (xi.astype(float) + 1j * xq.astype(float)) / fs
+    b = (rx["out_i"].astype(float) + 1j * rx["out_q"].astype(float)) / fs
+    snr = _best_delay_snr(a, b, max_offset=30)
+    assert snr > 60, f"TX-then-RX round trip only scored {snr:.1f} dB"
+    print(f"TX-then-RX round trip: {snr:.1f} dB OK")
+
+
+def test_tx_stage_refuses_the_separate_mixer():
+    """tx_stage() has to inherit mix_stage()'s guard against the separate architecture.
+
+    tx_stage() does not repeat that check itself; this confirms the guard
+    still reaches the caller through the composed pipeline rather than only
+    being tested at the mix_stage() layer directly.
+    """
+    ddc = DDC(DDCConfig(mix_arch=MIX_SEPARATE))
+    xi, xq = G.tone(256, 300_000.0, 40_000.0, -6.0, 16)
+    try:
+        ddc.tx_stage(xi, xq)
+    except ValueError as e:
+        assert "up-convert" in str(e), e
+        print("tx_stage refuses the separate mixer OK")
+        return
+    raise AssertionError("tx_stage() silently accepted mix_arch='separate'")
+
+
+def _best_delay_snr(a: np.ndarray, b: np.ndarray, max_offset: int) -> float:
+    """SNR of `b` against `a`, best-aligned over an integer delay and a single complex gain.
+
+    Two cascaded FIR stages (and, in the TX/RX case, two CORDIC rotations)
+    introduce a group delay this repo does not track symbolically, and the
+    round-trip tests above care whether the *waveform* survived, not what
+    the exact delay or overall complex gain happened to be. Solving for the
+    best single complex gain also absorbs any fixed rotation from a
+    non-integer true delay, which is why a fitted gain here is not
+    meaningful on its own and only the resulting SNR is asserted on.
+
+    Args:
+        a: Reference complex sequence.
+        b: Sequence to score, at the same sample rate as `a`.
+        max_offset: Largest integer delay (either direction) to search.
+
+    Returns:
+        The best SNR found, in dB.
+    """
+    best = None
+    for off in range(0, max_offset):
+        aa = a[: len(a) - off] if off > 0 else a
+        bb = b[off : off + len(aa)]
+        m = min(len(aa), len(bb))
+        if m < 200:
+            continue
+        aa2, bb2 = aa[:m], bb[:m]
+        denom = np.vdot(bb2, bb2)
+        if denom == 0:
+            continue
+        g = np.vdot(bb2, aa2) / denom
+        err = aa2 - g * bb2
+        snr = 10 * np.log10(np.mean(np.abs(aa2) ** 2) / np.mean(np.abs(err) ** 2))
+        if best is None or snr > best:
+            best = snr
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -929,13 +1143,13 @@ def test_quantization_that_breaks_linear_phase_is_rejected():
     h = G.firwin_lowpass(cfg.n_taps, cfg.fir_cutoff / (cfg.fs_in / 2))
 
     # Wide enough that the residue lands on the centre tap: symmetry survives.
-    q = G.fir_taps_quantized(h, 16, True, cfg.k_gain)
+    q = G.fir_taps_quantized(h, 16, 1.0 / cfg.k_gain)
     assert np.array_equal(q, q[::-1]), "16-bit taps should still be symmetric"
 
     # Narrow enough that the argmax moves off centre and symmetry breaks. If
     # this stops raising, the guard has gone vacuous.
     try:
-        G.fir_taps_quantized(h, 10, True, cfg.k_gain)
+        G.fir_taps_quantized(h, 10, 1.0 / cfg.k_gain)
         raised = False
     except ValueError as e:
         raised = "linear phase" in str(e)
@@ -1032,6 +1246,12 @@ def main():
     test_upconvert_then_downconvert_returns_the_input()
     test_direction_is_a_port_not_a_parameter()
     test_separate_mixer_refuses_to_upconvert()
+
+    test_interpolator_targets_decim_over_k_gain()
+    test_polyphase_decomposition_matches_zero_stuffed_convolution()
+    test_interpolate_then_decimate_round_trip()
+    test_tx_then_rx_round_trip()
+    test_tx_stage_refuses_the_separate_mixer()
 
     test_fir_has_unit_dc_gain_and_linear_phase()
     test_fir_rejects_out_of_band()

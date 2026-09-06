@@ -37,8 +37,16 @@ handed off to GNU Radio for the actual demod/mod work.
   beats a long FIR. At ÷8 it would save little and cost passband droop that needs a
   compensating FIR afterward anyway. Exploits the filter's own linear-phase symmetry
   (`h[k] == h[62-k]`) to halve the multiply count — see the rate budget below.
-- **Interpolating filter** — the TX-side counterpart, upsampling ahead of the CORDIC.
-  Also where TX's 1/K correction goes, since on TX the filter precedes the mixer.
+- **Interpolating filter** (`rx/fir_interpolate.sv`) — the TX-side counterpart, upsampling
+  by 8 ahead of the CORDIC. Same 63 taps as the decimator, but scaled to a DC gain of
+  `decim/K` rather than `1/K`: zero-stuffing on its own cuts the amplitude by `1/decim`,
+  and this filter has to put that back on top of pre-cancelling the mixer's K, which now
+  runs *after* it instead of before. Realized as a polyphase filter (each of the 8 output
+  phases reads a different sub-sampling of the 63 taps directly against the un-stuffed
+  input history) rather than literal zero-stuffing, which is exact, not approximate — see
+  the rate budget below. Not folded for symmetry the way the decimator is: a polyphase
+  sub-filter's taps are an arbitrary stride through the coefficient array, not a mirror
+  pair, so there is nothing to fold.
 - **GNU Radio** — off-chip, file-based, handles demodulation and modulation.
 
 ## Rate budget
@@ -67,6 +75,16 @@ Second, 19 clocks/sample is a ceiling on input rate: 2.4 MS/s needs 45.6 MHz and
 linearly, so a 10 MS/s capture would demand 190 MHz. If the input rate ever rises that
 far, the fix is to unroll the CORDIC into 16 pipeline stages for one sample per clock,
 trading ~16× the adders for the rate — not to push the clock.
+
+TX is the mirror image, with the multiply work moved to the *other* side of the mixer: for
+every baseband sample accepted, the interpolator must produce 8 outputs, one every 19
+clocks (matching the mixer's own consumption rate), so it has the same 152-clock envelope
+per baseband sample. Its 63 taps split into 8 polyphase sub-filters of 7 or 8 taps each
+(63 is not a multiple of 8, so one phase is one tap short) — worst case 8 MACs per output,
+comfortably inside 19 clocks with no folding needed. Unlike the decimator, no new baseband
+sample can arrive mid-computation (the interpolator's own `in_ready` stays low until all 8
+phases are produced), so there is no address-vs-live-write race to guard against and the
+history is a plain 8-deep shift register per rail, not a circular buffer.
 
 ## Synthesis
 
@@ -168,7 +186,7 @@ costs 32 flip-flops — deliberately not spent, since area is what binds here.
 
 ## Verification
 
-The numpy reference model is `cordic/reference/ddc_reference.py`, with 39 tests in
+The numpy reference model is `cordic/reference/ddc_reference.py`, with 44 tests in
 `cordic/reference/test_ddc_reference.py` (`python cordic/reference/test_ddc_reference.py`).
 
 It is two models in one file. `ddc_ideal()` is float64, exact: what the answer should be.
@@ -209,9 +227,14 @@ through the serial interface. Both drive the direction pin to the wrong value wh
 rotation is running, so a design that read the live pin instead of latching it with the
 sample fails every case rather than passing by luck.
 
-The full TX chain is not verified yet, because it does not exist: TX interpolates *before*
-the mixer, and the interpolator is unbuilt. What is verified is the TX **mixer**, which is
-the part that tapes out.
+The full TX *silicon* chain still only covers the mixer, since the interpolator is FPGA/host
+scope, same as the decimator — but the reference model's TX chain (interpolate then
+up-convert) is now verified end to end: `test_tx_then_rx_round_trip` interpolates and
+up-converts a baseband tone, treats the result as a captured RF signal, then down-converts
+and decimates it back with the RX chain, recovering the original at 77.9 dB SNR. That one
+test exercises the interpolator, both mixer directions, and the decimator together, so a
+wrong sign or a wrong gain anywhere in the chain would show up there even if it happened to
+cancel in a narrower test.
 
 ### The decimating FIR
 
@@ -231,6 +254,26 @@ into the repo alongside the RTL (the same pattern `cordic/cordic_atan_table.svh`
 Since the RTL folds the filter around its own symmetry, only the first 32 of the 63 taps
 are needed; the generator re-checks the exact-symmetry property before halving the table,
 independently of the check the reference model already applies when it quantizes them.
+
+### The TX interpolator
+
+`rx/fir_interpolate.sv` is a polyphase realization, not literal zero-stuffing, so it has to
+be checked against something proving the two are actually equal, not just plausible.
+`test_polyphase_decomposition_matches_zero_stuffed_convolution` builds the polyphase answer
+by hand in Python and checks it bit-for-bit against `fir_interpolate()`'s zero-stuffed
+reference before the RTL is ever trusted against either one — this is also where an earlier
+mistake was caught: `fir_interpolate()` originally used `'valid'`-mode convolution, which
+offsets the correspondence by `n_taps-1` against the polyphase formula's plain
+`y[n*interp+p] = sum_k coef[p+k*interp]*x[n-k]`; switching to causal, zero-history
+convolution (matching what a real reset filter does, and matching that the interpolator —
+unlike the decimator — has no window-fill period to wait out) fixed it. `rx/run_sim_fir_interp.sh`
+then checks the RTL itself: 4096/4096 outputs bit-exact against `interp_i.hex`/`interp_q.hex`.
+
+The coefficient ROM is generated the same way the decimator's is, but flat rather than
+folded — a polyphase sub-filter's taps are an arbitrary stride through the array, not a
+mirror pair, so there is no symmetry to exploit — and paired with a per-phase tap-count
+table (`FIR_INTERP_PHASE_LEN`), since 63 taps over 8 phases leaves one phase with 7 instead
+of 8: the RTL reads that count rather than assuming every phase is the same length.
 
 ### Design facts from the reference model
 

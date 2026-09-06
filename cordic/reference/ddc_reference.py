@@ -306,23 +306,26 @@ def firwin_lowpass(n_taps: int, cutoff_norm: float) -> np.ndarray:
 
 
 def fir_taps_quantized(
-    h: np.ndarray, coef_bits: int, fold_inv_k: bool, k_gain: float
+    h: np.ndarray, coef_bits: int, target_dc: float
 ) -> np.ndarray:
-    """Quantize taps to `coef_bits`, optionally folding in the 1/K correction.
+    """Quantize taps to `coef_bits`, targeting an exact DC gain.
 
     Any rounding error is absorbed into the largest tap, so the quantized
-    coefficient sum matches the target DC gain exactly.
+    coefficient sum matches `target_dc` exactly rather than only
+    approximately. The caller picks target_dc for the filter's position in
+    the chain: 1/k_gain for the RX decimator (undoing the mixer's K, which
+    ran before it), decim/k_gain for the TX interpolator (undoing the
+    mixer's K, which runs after it, on top of restoring the amplitude
+    zero-stuffing removes), or 1.0 for a filter with no mixer to compensate.
 
     Args:
         h: Float-precision filter taps, unit DC gain.
         coef_bits: Target coefficient word width.
-        fold_inv_k: Whether to fold the 1/K correction into the DC gain.
-        k_gain: The CORDIC gain K, used when fold_inv_k is set.
+        target_dc: The exact DC gain the quantized taps must sum to.
 
     Returns:
         The quantized, saturated taps at `coef_bits`.
     """
-    target_dc = (1.0 / k_gain) if fold_inv_k else 1.0
     scale = full_scale(coef_bits)
     q = np.round(h * target_dc * scale).astype(np.int64)
     want = int(round(target_dc * scale))
@@ -393,6 +396,96 @@ def fir_decimate(xi, xq, coef, decim, coef_bits, acc_bits, out_bits, shift_mode)
     yq = shr(acc_q, sh, shift_mode)
     n_sat += would_saturate(yi, out_bits) + would_saturate(yq, out_bits)
     return sat(yi, out_bits), sat(yq, out_bits), n_sat
+
+
+def fir_interpolate(xi, xq, coef, interp, coef_bits, acc_bits, out_bits, shift_mode):
+    """Run an interpolating FIR on a complex stream.
+
+    Zero-stuffs by `interp` (inserts interp-1 zeros between input samples,
+    raising the sample rate by that factor) then filters causally, with the
+    delay line starting at zero -- the same assumption a real reset filter
+    makes, and the reason this is 'full' convolution truncated to the
+    zero-stuffed length, not 'valid': unlike fir_decimate, there is no
+    window-fill requirement to wait out here, so every output sample counts,
+    including the startup transient while the delay line is still filling.
+    Correct amplitude depends on the taps already targeting a DC gain that
+    includes `interp` (see fir_taps_quantized's target_dc) -- zero-stuffing
+    attenuates by 1/interp on its own, and the filter is what restores it.
+
+    This is the direct (zero-stuffed) realization, not the polyphase one the
+    RTL implements -- the two are exactly equal (skipping multiplies by
+    known zeros changes nothing about the result) only because both are
+    causal with the same zero-history convention; using 'valid' convolution
+    here would offset the correspondence by n_taps-1 against the polyphase
+    formula's plain y[n*interp+p] = sum_k coef[p+k*interp]*x[n-k].
+
+    Args:
+        xi, xq: Input I/Q samples, at the pre-interpolation rate.
+        coef: Quantized filter taps (DC gain already includes `interp`).
+        interp: Interpolation factor.
+        coef_bits: Coefficient word width.
+        acc_bits: Accumulator width.
+        out_bits: Output word width.
+        shift_mode: TRUNC or ROUND, for the output shift.
+
+    Returns:
+        An (i, q, n_saturated) tuple: interpolated output at `out_bits`,
+        length len(xi)*interp (including the startup transient -- there is
+        no separate "not yet valid" region the way fir_decimate has), and
+        the count of saturated samples across both stages.
+    """
+    xi = np.asarray(xi, dtype=np.int64)
+    xq = np.asarray(xq, dtype=np.int64)
+
+    def zero_stuff(x):
+        y = np.zeros(x.size * interp, dtype=np.int64)
+        y[::interp] = x
+        return y
+
+    zi = zero_stuff(xi)
+    zq = zero_stuff(xq)
+
+    # 'full', truncated to the zero-stuffed length: causal, zero initial
+    # history, one output per zero-stuffed input sample -- see the docstring
+    # for why 'valid' would misalign against the RTL's polyphase formula.
+    acc_i = np.convolve(zi, coef, mode="full")[: zi.size]
+    acc_q = np.convolve(zq, coef, mode="full")[: zq.size]
+    assert_fits(acc_i, "interpolator accumulator")
+    assert_fits(acc_q, "interpolator accumulator")
+
+    n_sat = would_saturate(acc_i, acc_bits) + would_saturate(acc_q, acc_bits)
+    acc_i = sat(acc_i, acc_bits)
+    acc_q = sat(acc_q, acc_bits)
+
+    sh = coef_bits - 1
+    yi = shr(acc_i, sh, shift_mode)
+    yq = shr(acc_q, sh, shift_mode)
+    n_sat += would_saturate(yi, out_bits) + would_saturate(yq, out_bits)
+    return sat(yi, out_bits), sat(yq, out_bits), n_sat
+
+
+def polyphase_decompose(coef, interp):
+    """Split flat filter taps into per-phase index lists for a polyphase interpolator.
+
+    Phase p (0 <= p < interp) uses taps at indices p, p+interp, p+2*interp,
+    ..., matching y[n*interp+p] = sum_k coef[p+k*interp] * x[n-k] -- the
+    standard polyphase identity, equal to fir_interpolate()'s zero-stuffed
+    convolution term for term, not an approximation of it (see
+    fir_interpolate()'s docstring). When len(coef) is not a multiple of
+    interp, the phases are uneven by construction: one phase gets one fewer
+    tap than the rest. The RTL reads each phase's tap count from this
+    decomposition rather than assuming they are equal.
+
+    Args:
+        coef: Quantized filter taps, flat, length N.
+        interp: Interpolation factor.
+
+    Returns:
+        A list of `interp` index arrays; phase p's array holds the indices
+        into `coef` for that phase, in ascending k order.
+    """
+    n_taps = len(coef)
+    return [np.arange(p, n_taps, interp) for p in range(interp)]
 
 
 # --------------------------------------------------------------------------
@@ -607,8 +700,19 @@ class DDC:
         self.atan = atan_table(c.n_iter, c.ang_bits)
         self.h_float = firwin_lowpass(c.n_taps, c.fir_cutoff / (c.fs_in / 2))
         self.fold_inv_k = c.mix_arch == MIX_FUSED
-        self.coef = fir_taps_quantized(
-            self.h_float, c.coef_bits, self.fold_inv_k, c.k_gain
+        rx_target_dc = (1.0 / c.k_gain) if self.fold_inv_k else 1.0
+        self.coef = fir_taps_quantized(self.h_float, c.coef_bits, rx_target_dc)
+
+        # TX interpolator: same filter shape, but sits *before* the mixer, so
+        # it has to both restore the amplitude zero-stuffing removes (a
+        # factor of `decim`, reused here as the interpolation factor -- RX
+        # and TX are a mirror image at the same rate change) and pre-cancel
+        # the mixer's K, which now runs after it rather than before. Only
+        # meaningful for the fused mixer, which is the only one with an
+        # up-convert path (see mix_stage()); computed unconditionally anyway
+        # since it is cheap and mix_stage() is what actually gates TX use.
+        self.coef_interp = fir_taps_quantized(
+            self.h_float, c.coef_bits, c.decim / c.k_gain
         )
 
     # -- phase -----------------------------------------------------------
@@ -825,6 +929,44 @@ class DDC:
         )
         n_sat += m.pop("n_mix_saturated")
         return {**m, "out_i": yi, "out_q": yq, "n_saturated": n_sat}
+
+    def tx_stage(self, xi, xq=None, phase0: int = 0) -> dict:
+        """Run the full TX chain: interpolate, then up-convert.
+
+        The mirror of run(), but not run() with a flag: run() is
+        mixer(down) -> decimate, this is interpolate -> mixer(up) -- the
+        filter and mixer swap order, so it is a different pipeline, not the
+        same one reversed.
+
+        Args:
+            xi: Input baseband I samples, at data_bits.
+            xq: Input baseband Q samples, at data_bits. None for a
+                real-valued input, in which case Q is treated as zero.
+            phase0: Initial NCO phase.
+
+        Returns:
+            A dict: interp_i, interp_q (the pre-mixer, interpolated-rate
+            signal, at data_bits), mix_i, mix_q (the RF-rate output, at
+            mix_bits), stim_i, stim_q, and n_saturated.
+        """
+        c = self.cfg
+        xi = sat(np.asarray(xi, np.int64), c.data_bits)
+        xq = np.zeros_like(xi) if xq is None else sat(np.asarray(xq, np.int64), c.data_bits)
+        if xi.shape != xq.shape:
+            raise ValueError(f"I/Q length mismatch: {xi.shape} vs {xq.shape}")
+
+        ii, iq, n_interp_sat = fir_interpolate(
+            xi, xq, self.coef_interp, c.decim, c.coef_bits, c.acc_bits,
+            c.data_bits, c.shift_mode,
+        )
+        m = self.mix_stage(ii, iq, phase0, downconvert=False)
+        n_sat = n_interp_sat + m.pop("n_mix_saturated")
+        return {
+            "interp_i": ii, "interp_q": iq,
+            "mix_i": m["mix_i"], "mix_q": m["mix_q"],
+            "stim_i": xi, "stim_q": xq,
+            "n_saturated": n_sat,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -1079,11 +1221,35 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
         up = ddc.mix_stage(xi, xq, downconvert=False)
         files["mix_up_i.hex"] = (up["mix_i"], c.mix_bits)
         files["mix_up_q.hex"] = (up["mix_q"], c.mix_bits)
+
+    # TX interpolator vectors: baseband-rate stimulus in, interpolated-rate
+    # (pre-mixer) output out. A separate, shorter, lower-rate stimulus than
+    # the RX vectors above -- this checks fir_interpolate.sv standalone, not
+    # the full TX chain (tx_top does not exist yet), so it only needs to
+    # exercise the interpolator's own polyphase engine.
+    n_tx = 512
+    tx_i = tx_q = None
+    if c.mix_arch == MIX_FUSED:
+        t = np.arange(n_tx)
+        a = full_scale(c.data_bits) * (10.0 ** (-6.0 / 20.0)) / 2.0
+        z = a * np.exp(1j * 2 * np.pi * 40_000.0 / c.fs_out * t) + \
+            a * np.exp(1j * 2 * np.pi * -25_000.0 / c.fs_out * t + 0.7j)
+        tx_i = sat(np.round(z.real).astype(np.int64), c.data_bits)
+        tx_q = sat(np.round(z.imag).astype(np.int64), c.data_bits)
+        interp_i, interp_q, n_interp_sat = fir_interpolate(
+            tx_i, tx_q, ddc.coef_interp, c.decim, c.coef_bits, c.acc_bits,
+            c.data_bits, c.shift_mode,
+        )
+        files["tx_stim_i.hex"] = (tx_i, c.data_bits)
+        files["tx_stim_q.hex"] = (tx_q, c.data_bits)
+        files["interp_i.hex"] = (interp_i, c.data_bits)
+        files["interp_q.hex"] = (interp_q, c.data_bits)
+
     _write_hex_files(out_dir, files)
 
     svh = os.path.join(out_dir, "ddc_params.svh")
     with open(svh, "w", newline="\n") as f:
-        f.write(_params_svh(ddc, n, len(r["out_i"])))
+        f.write(_params_svh(ddc, n, len(r["out_i"]), n_tx, None if tx_i is None else len(interp_i)))
 
     manifest = {
         "config": asdict(c),
@@ -1097,6 +1263,8 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
             "n_output_samples": len(r["out_i"]),
             "n_saturated": r["n_saturated"],
             "n_saturated_upconvert": None if up is None else up["n_mix_saturated"],
+            "n_tx_stim_samples": None if tx_i is None else n_tx,
+            "n_interp_samples": None if tx_i is None else len(interp_i),
         },
         "files": sorted(files) + ["ddc_params.svh"],
     }
@@ -1106,13 +1274,17 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
     return manifest
 
 
-def _params_svh(ddc: DDC, n_in: int, n_out: int) -> str:
+def _params_svh(ddc: DDC, n_in: int, n_out: int, n_tx: int | None = None, n_interp: int | None = None) -> str:
     """Render the RTL parameter header for the given DDC configuration.
 
     Args:
         ddc: The DDC model the parameters are drawn from.
         n_in: Stimulus length in samples, for the N_STIM localparam.
         n_out: Output length in samples, for the N_OUT localparam.
+        n_tx: TX baseband stimulus length, for N_TX_STIM. None if TX vectors
+            were not emitted (mix_arch is not fused).
+        n_interp: Interpolator output length, for N_INTERP_OUT. None along
+            with n_tx.
 
     Returns:
         The contents of ddc_params.svh as a string.
@@ -1165,7 +1337,13 @@ localparam int SHIFT_ROUNDS = {1 if c.shift_mode == ROUND else 0};  // 0 = trunc
 
 localparam int N_STIM = {n_in};
 localparam int N_OUT  = {n_out};
-
+{f'''
+// TX interpolator vectors -- see rx/gen_fir_coef.py for the coefficient
+// table these check against (fir_interp_coef_table.svh), generated
+// separately since it is not folded the way the decimator's is.
+localparam int N_TX_STIM   = {n_tx};
+localparam int N_INTERP_OUT = {n_interp};
+''' if n_tx is not None else ''}
 `endif
 """
 
