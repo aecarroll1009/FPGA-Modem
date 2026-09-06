@@ -1222,11 +1222,10 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
         files["mix_up_i.hex"] = (up["mix_i"], c.mix_bits)
         files["mix_up_q.hex"] = (up["mix_q"], c.mix_bits)
 
-    # TX interpolator vectors: baseband-rate stimulus in, interpolated-rate
-    # (pre-mixer) output out. A separate, shorter, lower-rate stimulus than
-    # the RX vectors above -- this checks fir_interpolate.sv standalone, not
-    # the full TX chain (tx_top does not exist yet), so it only needs to
-    # exercise the interpolator's own polyphase engine.
+    # TX chain vectors: baseband-rate stimulus in, both the pre-mixer
+    # (interp_i/q, checks fir_interpolate.sv standalone) and post-mixer
+    # (tx_mix_i/q, checks tx_top end to end) outputs, from one call to
+    # tx_stage() so the two stages cannot desync from each other.
     n_tx = 512
     tx_i = tx_q = None
     if c.mix_arch == MIX_FUSED:
@@ -1236,20 +1235,19 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
             a * np.exp(1j * 2 * np.pi * -25_000.0 / c.fs_out * t + 0.7j)
         tx_i = sat(np.round(z.real).astype(np.int64), c.data_bits)
         tx_q = sat(np.round(z.imag).astype(np.int64), c.data_bits)
-        interp_i, interp_q, n_interp_sat = fir_interpolate(
-            tx_i, tx_q, ddc.coef_interp, c.decim, c.coef_bits, c.acc_bits,
-            c.data_bits, c.shift_mode,
-        )
+        tx = ddc.tx_stage(tx_i, tx_q)
         files["tx_stim_i.hex"] = (tx_i, c.data_bits)
         files["tx_stim_q.hex"] = (tx_q, c.data_bits)
-        files["interp_i.hex"] = (interp_i, c.data_bits)
-        files["interp_q.hex"] = (interp_q, c.data_bits)
+        files["interp_i.hex"] = (tx["interp_i"], c.data_bits)
+        files["interp_q.hex"] = (tx["interp_q"], c.data_bits)
+        files["tx_mix_i.hex"] = (tx["mix_i"], c.mix_bits)
+        files["tx_mix_q.hex"] = (tx["mix_q"], c.mix_bits)
 
     _write_hex_files(out_dir, files)
 
     svh = os.path.join(out_dir, "ddc_params.svh")
     with open(svh, "w", newline="\n") as f:
-        f.write(_params_svh(ddc, n, len(r["out_i"]), n_tx, None if tx_i is None else len(interp_i)))
+        f.write(_params_svh(ddc, n, len(r["out_i"]), n_tx, None if tx_i is None else len(tx["interp_i"])))
 
     manifest = {
         "config": asdict(c),
@@ -1264,7 +1262,8 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
             "n_saturated": r["n_saturated"],
             "n_saturated_upconvert": None if up is None else up["n_mix_saturated"],
             "n_tx_stim_samples": None if tx_i is None else n_tx,
-            "n_interp_samples": None if tx_i is None else len(interp_i),
+            "n_interp_samples": None if tx_i is None else len(tx["interp_i"]),
+            "n_saturated_tx": None if tx_i is None else tx["n_saturated"],
         },
         "files": sorted(files) + ["ddc_params.svh"],
     }

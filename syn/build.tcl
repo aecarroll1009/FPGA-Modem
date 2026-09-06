@@ -3,10 +3,11 @@
 # Run from the repo root via syn/run_syn.ps1, or directly:
 #   quartus_sh -t syn/build.tcl [top] [device]
 #
-# Two tops are buildable and they answer different questions. rx_top is the
-# FPGA RX chain. tt_um_cordic_ddc is the unit that tapes out, where the mixing
-# direction is a live pin rather than a constant -- so it is the build that
-# actually pays for the runtime direction rather than folding it away.
+# Three tops are buildable and they answer different questions. rx_top is the
+# FPGA RX chain. tx_top is the FPGA TX chain. tt_um_cordic_ddc is the unit
+# that tapes out, where the mixing direction is a live pin rather than a
+# constant -- so it is the build that actually pays for the runtime
+# direction rather than folding it away.
 #
 # Everything it writes lands in syn/output/, which is gitignored -- the project
 # is generated from this script rather than checked in, so the file list and
@@ -33,6 +34,7 @@ set common {
 }
 set tops [dict create \
     rx_top            [concat $common {rx/fir_decimate.sv rx/rx_top.sv}] \
+    tx_top            [concat $common {rx/fir_interpolate.sv tx/tx_top.sv}] \
     tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}]]
 
 if {![dict exists $tops $top]} {

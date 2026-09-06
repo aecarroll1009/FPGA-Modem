@@ -89,11 +89,12 @@ history is a plain 8-deep shift register per rail, not a circular buffer.
 ## Synthesis
 
 `syn/` builds with Quartus so the rate budget above is checked against a real device
-instead of only against simulation. Two tops are buildable, and they answer different
+instead of only against simulation. Three tops are buildable, and they answer different
 questions:
 
 ```
 powershell -File syn/run_syn.ps1                          # rx_top, the FPGA RX chain
+powershell -File syn/run_syn.ps1 -Top tx_top              # tx_top, the FPGA TX chain
 powershell -File syn/run_syn.ps1 -Top tt_um_cordic_ddc    # the unit that tapes out
 ```
 
@@ -104,22 +105,31 @@ device cannot drift away from the RTL. Everything it writes goes to the gitignor
 Measured on a Cyclone V 5CEBA4F23C7 (speed grade 7 — the slow common grade, so the faster
 parts only do better), Quartus Lite 17.0, constrained at 50 MHz:
 
-| | `rx_top` (CORDIC + FIR) | `tt_um_cordic_ddc` (CORDIC only) |
-|---|---|---|
-| Fmax (slow 1100 mV 85 °C) | **69.55 MHz** | **102.81 MHz** |
-| Setup / hold slack | +5.622 / +0.256 ns | +10.273 / +0.236 ns |
-| Logic | 375 ALMs | 251 ALMs |
-| Registers | 389 | 255 |
-| DSP blocks | **2** | **0** |
-| Block memory | 8,704 bits | 0 bits |
+| | `rx_top` (CORDIC + decimator) | `tx_top` (CORDIC + interpolator) | `tt_um_cordic_ddc` (CORDIC only) |
+|---|---|---|---|
+| Fmax (slow 1100 mV 85 °C) | **69.55 MHz** | **87.05 MHz** | **102.81 MHz** |
+| Setup / hold slack | +5.622 / +0.256 ns | +8.513 / +0.259 ns | +10.273 / +0.236 ns |
+| Logic | 375 ALMs | 492 ALMs | 251 ALMs |
+| Registers | 389 | 841 | 255 |
+| DSP blocks | **2** | **2** | **0** |
+| Block memory | 8,704 bits | 0 bits | 0 bits |
 
-Three things worth reading off that table. The rate budget is not close to binding on
-either build — `rx_top`'s 69.55 MHz is still 1.53× the 45.6 MHz the CORDIC needs, so the
-iterative CORDIC remains the right call and the unrolled version stays unnecessary. The
-CORDIC itself still spends **no** DSP blocks, because shift-and-add is the whole point of
-it — `tt_um_cordic_ddc`, which is CORDIC-only, proves that in isolation; the 2 DSP blocks
-and 8,704 memory bits in `rx_top` are entirely the FIR's, one multiplier per rail plus its
-128-deep×4-copy delay line (see the rate budget above for why 2 multipliers, not 1).
+Three things worth reading off that table. The rate budget is not close to binding on any
+build — even `rx_top`'s 69.55 MHz, the tightest of the three, is still 1.53× the 45.6 MHz
+the CORDIC needs, so the iterative CORDIC remains the right call and the unrolled version
+stays unnecessary. The CORDIC itself still spends **no** DSP blocks, because shift-and-add
+is the whole point of it — `tt_um_cordic_ddc`, which is CORDIC-only, proves that in
+isolation; the 2 DSP blocks in each of the other two builds are entirely the filter's, one
+multiplier per rail (see the rate budget above for why 2, not 1, in both directions).
+
+The two filters land in opposite places on block memory for a structural reason, not an
+oversight: the decimator's 128-deep×4-copy delay line is large enough that Quartus maps it
+onto M10K (8,704 bits), while the interpolator's 8-deep shift register is small enough that
+plain flip-flops are simply the right call — there is no threshold being missed, just two
+delay lines two orders of magnitude apart in size. `tx_top`'s extra ~450 registers over
+`rx_top` are almost entirely the interpolator's own state plus the elastic queue between it
+and the mixer (see tx_top.sv's header for why that queue exists), not the coefficient
+storage, which at 63 entries × 16 bits is smaller than either delay line.
 
 And the runtime direction is close to free — compare `tt_um_cordic_ddc` against the
 CORDIC-only numbers from before the direction became a port (238 ALMs, 175 registers,
@@ -227,14 +237,13 @@ through the serial interface. Both drive the direction pin to the wrong value wh
 rotation is running, so a design that read the live pin instead of latching it with the
 sample fails every case rather than passing by luck.
 
-The full TX *silicon* chain still only covers the mixer, since the interpolator is FPGA/host
-scope, same as the decimator — but the reference model's TX chain (interpolate then
-up-convert) is now verified end to end: `test_tx_then_rx_round_trip` interpolates and
-up-converts a baseband tone, treats the result as a captured RF signal, then down-converts
-and decimates it back with the RX chain, recovering the original at 77.9 dB SNR. That one
-test exercises the interpolator, both mixer directions, and the decimator together, so a
-wrong sign or a wrong gain anywhere in the chain would show up there even if it happened to
-cancel in a narrower test.
+On silicon, TX only ever covers the mixer — the interpolator is FPGA/host scope, same as
+the decimator — but both the reference model and the FPGA RTL now have a complete TX chain.
+`test_tx_then_rx_round_trip` interpolates and up-converts a baseband tone, treats the
+result as a captured RF signal, then down-converts and decimates it back with the RX chain,
+recovering the original at 77.9 dB SNR. That one test exercises the interpolator, both
+mixer directions, and the decimator together, so a wrong sign or a wrong gain anywhere in
+the chain would show up there even if it happened to cancel in a narrower test.
 
 ### The decimating FIR
 
@@ -274,6 +283,27 @@ folded — a polyphase sub-filter's taps are an arbitrary stride through the arr
 mirror pair, so there is no symmetry to exploit — and paired with a per-phase tap-count
 table (`FIR_INTERP_PHASE_LEN`), since 63 taps over 8 phases leaves one phase with 7 instead
 of 8: the RTL reads that count rather than assuming every phase is the same length.
+
+### `tx_top`: closing the loop between two very different paces
+
+The interpolator produces its 8 outputs for one baseband sample as fast as its own MAC
+engine allows — no pacing built in, since nothing required it in isolation — while the
+mixer accepts new samples only once every 19 clocks. Wiring one straight into the other
+would silently drop most of the 8 samples: the mixer only samples `in_valid` while idle,
+and it spends most of its time busy. `tx_top.sv` bridges this with a small elastic queue
+(depth 8, matching the interpolation factor): every interpolator output is captured as it
+arrives and drained into the mixer one entry per rotation, and the next baseband sample is
+not accepted until the queue is *fully drained* — not merely until the interpolator is
+idle, which happens much earlier — since accepting early would start overwriting queue
+slots the mixer had not yet read.
+
+This composition of two blocks at very different paces is exactly what no other testbench
+exercises, which is why `tx/tb_tx_top.sv` exists rather than treating the interpolator and
+mixer tests as sufficient on their own: it drives baseband-rate stimulus in and checks
+4096/4096 RF-rate outputs bit-exact against `tx_mix_i.hex`/`tx_mix_q.hex`, catching a
+dropped, duplicated, or reordered sample that neither block's own test could see. It passed
+on the first attempt, which is the payoff of designing the queue's drain condition
+(`interpolator idle AND queue empty`, not just the first) on paper before writing the RTL.
 
 ### Design facts from the reference model
 
