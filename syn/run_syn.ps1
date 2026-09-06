@@ -1,12 +1,18 @@
-# Builds rx_top with Quartus and prints the two numbers that matter: Fmax and
+# Builds a top with Quartus and prints the two numbers that matter: Fmax and
 # resource usage. Run from anywhere:
 #
-#   powershell -File syn/run_syn.ps1 [-Device 5CEBA4F23C7]
+#   powershell -File syn/run_syn.ps1 [-Top rx_top] [-Device 5CEBA4F23C7]
+#
+# -Top rx_top           the FPGA RX chain (default)
+# -Top tt_um_cordic_ddc the unit that tapes out, where the mixing direction is
+#                       a live pin instead of a constant
 #
 # Quartus is Windows-only here, so this is PowerShell while the simulation
 # scripts are bash under WSL. Both are driven from the same RTL.
 
 param(
+    [ValidateSet("rx_top", "tt_um_cordic_ddc")]
+    [string]$Top = "rx_top",
     [string]$Device = "5CEBA4F23C7",
     [string]$QuartusRoot = "C:\intelFPGA_lite\17.0\quartus"
 )
@@ -20,13 +26,13 @@ if (-not (Test-Path $quartusSh)) {
     throw "quartus_sh not found at $quartusSh -- pass -QuartusRoot to point at your install"
 }
 
-Write-Host "building rx_top for $Device ..." -ForegroundColor Cyan
-& $quartusSh -t (Join-Path $syn "build.tcl") $Device
+Write-Host "building $Top for $Device ..." -ForegroundColor Cyan
+& $quartusSh -t (Join-Path $syn "build.tcl") $Top $Device
 if ($LASTEXITCODE -ne 0) { throw "Quartus build failed (exit $LASTEXITCODE)" }
 
 $out = Join-Path $syn "output"
-$fit = Join-Path $out "rx_top.fit.rpt"
-$sta = Join-Path $out "rx_top.sta.rpt"
+$fit = Join-Path $out "$Top.fit.rpt"
+$sta = Join-Path $out "$Top.sta.rpt"
 
 Write-Host "`n=== resources ===" -ForegroundColor Green
 if (Test-Path $fit) {

@@ -23,10 +23,13 @@ module tb_throughput #(
     logic                        busy, out_valid;
     logic signed [MIX_BITS-1:0]  mix_i, mix_q;
 
+    // Throughput is direction-independent -- both directions run the same
+    // 16 iterations through the same core -- so this measures down-convert.
     ddc_frontend dut (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .phase_inc (phase_inc),
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .phase_inc   (phase_inc),
+        .downconvert (1'b1),
         .in_valid  (in_valid),
         .xi        (xi),
         .xq        (xq),

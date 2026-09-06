@@ -9,6 +9,7 @@ Run:  python cordic/reference/test_ddc_reference.py
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 
@@ -444,6 +445,116 @@ def test_wrong_rotation_direction_in_fused_is_caught():
 
 
 # --------------------------------------------------------------------------
+# mixing direction (RX/TX), which on silicon is a runtime input
+# --------------------------------------------------------------------------
+
+
+def test_upconvert_matches_the_analytic_rotation():
+    """Confirms downconvert=False rotates by +theta, not by -theta.
+
+    Checked against the analytic K*x*exp(+j*theta) and, as the trap, against
+    the down-convert reference too. A direction bit that did nothing would
+    still score well on one of those; only scoring well on the right one and
+    badly on the wrong one shows the rotation actually reversed.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    n = 8192
+    xi, xq = G.tone(n, cfg.fs_in, 40_000.0, -6.0, cfg.data_bits)
+
+    fs_ = G.full_scale(cfg.data_bits)
+    up = ddc.mix_stage(xi, xq, downconvert=False)
+    got = (up["mix_i"] + 1j * up["mix_q"]) / fs_
+
+    ref_up = G.mix_ideal(xi, xq, cfg, downconvert=False)
+    ref_down = G.mix_ideal(xi, xq, cfg, downconvert=True)
+
+    snr_right = G.snr_db(ref_up, got)
+    snr_wrong = G.snr_db(ref_down, got)
+    assert snr_right > 55, f"up-convert scored only {snr_right:.1f} dB against +theta"
+    assert snr_wrong < 20, (
+        f"up-convert scored {snr_wrong:.1f} dB against the -theta reference too; "
+        f"the direction bit is not actually changing the rotation"
+    )
+    print(
+        f"up-convert: {snr_right:.1f} dB vs +theta, {snr_wrong:.1f} dB vs -theta OK"
+    )
+
+
+def test_upconvert_then_downconvert_returns_the_input():
+    """Confirms the two directions invert each other, up to the gain K^2.
+
+    Independent of the analytic model: if both directions shared one sign
+    error this still catches it, because the round trip would not close.
+
+    Amplitudes are chosen so nothing clips. A -6 dBFS complex tone has a
+    constant 0.5 envelope; one rotation takes it to 0.82 of data-bits full
+    scale, which still fits data_bits, and the second to 1.36, which fits
+    mix_bits. Both stay under the CORDIC's own 1.21 input limit.
+    """
+    cfg = DDCConfig(mix_arch=MIX_FUSED)
+    ddc = DDC(cfg)
+    n = 8192
+    xi, xq = G.tone(n, cfg.fs_in, 40_000.0, -6.0, cfg.data_bits)
+
+    up = ddc.mix_stage(xi, xq, downconvert=False)
+    assert np.abs(up["mix_i"]).max() < G.full_scale(cfg.data_bits), (
+        "the intermediate does not fit data_bits, so the round trip would be "
+        "measuring clipping rather than the rotation"
+    )
+    back = ddc.mix_stage(up["mix_i"], up["mix_q"], downconvert=True)
+
+    fs_ = G.full_scale(cfg.data_bits)
+    got = (back["mix_i"] + 1j * back["mix_q"]) / fs_
+    want = cfg.k_gain**2 * (np.asarray(xi, float) + 1j * np.asarray(xq, float)) / fs_
+
+    snr = G.snr_db(want, got)
+    assert snr > 50, f"round trip closed to only {snr:.1f} dB"
+    print(f"up then down returns the input at K^2, {snr:.1f} dB OK")
+
+
+def test_direction_is_a_port_not_a_parameter():
+    """Guards the tapeout decision: the die has to do both directions.
+
+    A parameter is frozen at tapeout, so one direction would reach silicon
+    unexercised and the other would not exist. This asserts against the RTL
+    source because that is where the mistake would be reintroduced -- the
+    Python model cannot tell a parameter from a port.
+    """
+    src_path = os.path.join(os.path.dirname(__file__), "..", "mixer_fused.sv")
+    with open(src_path) as f:
+        src = f.read()
+
+    assert re.search(r"input\s+logic\s+downconvert\s*,", src), (
+        "mixer_fused.sv does not declare downconvert as an input port"
+    )
+    assert not re.search(r"parameter\s+\w+\s+DOWNCONVERT", src), (
+        "mixer_fused.sv declares DOWNCONVERT as a parameter again -- that "
+        "freezes the direction at tapeout, which is exactly what the port "
+        "was introduced to avoid"
+    )
+    print("mixer direction is a runtime port, not a build-time parameter OK")
+
+
+def test_separate_mixer_refuses_to_upconvert():
+    """Confirms the separate architecture rejects up-convert instead of lying.
+
+    Only the fused mixer has an up-convert path; mix_separate() hardcodes the
+    conjugate. Silently returning a down-converted result would be worse than
+    an error, so this pins the error.
+    """
+    ddc = DDC(DDCConfig(mix_arch=MIX_SEPARATE))
+    xi, xq = G.tone(256, 2_400_000.0, 40_000.0, -6.0, 16)
+    try:
+        ddc.mix_stage(xi, xq, downconvert=False)
+    except ValueError as e:
+        assert "up-convert" in str(e), e
+        print("separate mixer refuses to up-convert OK")
+        return
+    raise AssertionError("mix_arch='separate' silently accepted downconvert=False")
+
+
+# --------------------------------------------------------------------------
 # filter and decimation
 # --------------------------------------------------------------------------
 
@@ -746,7 +857,20 @@ def test_fused_vectors_round_trip_at_mix_bits():
             back = read(name, cfg.mix_bits)
             assert np.array_equal(back, arr), f"{name} did not round-trip at mix_bits"
 
-        print("fused mix_i/mix_q round-trip at mix_bits, not data_bits, OK")
+        # The up-convert set the RTL testbench's second and third passes read.
+        # It has to be over the same stimulus and the same phase0, or those
+        # passes would be comparing against a different sample alignment.
+        up = ddc.mix_stage(xi, xq, downconvert=False)
+        for name, arr in (("mix_up_i.hex", up["mix_i"]), ("mix_up_q.hex", up["mix_q"])):
+            assert name in man["files"], f"{name} is missing from the manifest"
+            back = read(name, cfg.mix_bits)
+            assert np.array_equal(back, arr), f"{name} did not round-trip at mix_bits"
+        assert not np.array_equal(up["mix_i"], r["mix_i"]), (
+            "the up-convert vectors are identical to the down-convert ones, so "
+            "the testbench's direction passes would pass without a direction bit"
+        )
+
+        print("fused mix_i/mix_q and mix_up_* round-trip at mix_bits OK")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -903,6 +1027,11 @@ def main():
 
     test_separate_and_fused_agree()
     test_wrong_rotation_direction_in_fused_is_caught()
+
+    test_upconvert_matches_the_analytic_rotation()
+    test_upconvert_then_downconvert_returns_the_input()
+    test_direction_is_a_port_not_a_parameter()
+    test_separate_mixer_refuses_to_upconvert()
 
     test_fir_has_unit_dc_gain_and_linear_phase()
     test_fir_rejects_out_of_band()

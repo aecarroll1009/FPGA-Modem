@@ -3,23 +3,29 @@
 // multiplier -- prerotate_conj() handles the quadrant's 90-degree part with
 // sign swaps only, and the CORDIC's rotation handles the residual.
 //
-// DOWNCONVERT selects the rotation direction, so RX and TX share this one
+// downconvert selects the rotation direction, so RX and TX share this one
 // module instead of two near-duplicates: 1 rotates by -theta (down-convert,
 // mix with the NCO's conjugate), 0 rotates by +theta (up-convert). The two
 // cases differ only in sign -- rotating by +theta is the same computation as
 // rotating by -theta with the quadrant negated mod 4, so eff_quadrant folds
 // the direction into the existing case table rather than duplicating it.
 //
+// It is a port, not a parameter, on purpose. A parameter is frozen at
+// tapeout: the die would do one direction and the other would be untestable
+// silicon. As a port it costs only the select on two muxes that already
+// exist, and both directions are exercised by the same part.
+//
 // The CORDIC's output carries the gain K (~1.6467); that is removed later,
 // in the decimating/interpolating filter's coefficients, not here.
 //
 // in_valid is ignored while busy is high -- the caller must wait for busy
-// to fall before asserting the next sample. xi, xq, quadrant, and residual
-// are latched the instant a sample is accepted, so none of them need to
-// stay stable beyond that one cycle.
+// to fall before asserting the next sample. xi, xq, quadrant, residual, and
+// downconvert are latched the instant a sample is accepted, so none of them
+// need to stay stable beyond that one cycle. Direction may therefore change
+// from one sample to the next.
 //
-// Reference model (DOWNCONVERT=1 only -- the up-convert path has no
-// reference model yet): cordic/reference/ddc_reference.py, DDC.mix_fused().
+// Reference model: cordic/reference/ddc_reference.py, DDC.mix_fused(), whose
+// `downconvert` argument is this port.
 
 `timescale 1ns/1ps
 
@@ -27,11 +33,14 @@ module mixer_fused #(
     parameter int DATA_BITS   = 16,
     parameter int CORDIC_BITS = 18,
     parameter int MIX_BITS    = 17,
-    parameter int ANG_BITS    = 17,
-    parameter bit DOWNCONVERT = 1'b1
+    parameter int ANG_BITS    = 17
 ) (
     input  logic                        clk,
     input  logic                        rst_n,
+
+    // 1 = rotate by -theta (RX), 0 = rotate by +theta (TX). Sampled with the
+    // rest of the operands on the accept cycle.
+    input  logic                        downconvert,
 
     input  logic                        in_valid,
     input  logic signed [DATA_BITS-1:0] xi,
@@ -59,11 +68,11 @@ module mixer_fused #(
     localparam int ResidualBits = ANG_BITS - 2;
 
     // -- prerotate_conj: multiply (xi + j*xq) by exp(-j*eff_quadrant*pi/2) --
-    // DOWNCONVERT=1 uses quadrant as-is (exp(-j*quadrant*pi/2)); DOWNCONVERT=0
+    // downconvert=1 uses quadrant as-is (exp(-j*quadrant*pi/2)); downconvert=0
     // negates it mod 4, which is exp(+j*quadrant*pi/2) -- the up-conversion
     // rotation -- computed by the same case table.
     logic [1:0] eff_quadrant;
-    assign eff_quadrant = DOWNCONVERT ? quadrant : (2'd0 - quadrant);
+    assign eff_quadrant = downconvert ? quadrant : (2'd0 - quadrant);
 
     logic signed [DATA_BITS-1:0] ri, rq;
     always_comb begin
@@ -90,7 +99,7 @@ module mixer_fused #(
     assign y0_comb = rq_ext <<< Guard;
     assign residual_ext = {{(ANG_BITS-ResidualBits){1'b0}}, residual};
     // z0 = -residual to down-convert, +residual to up-convert.
-    assign z0_comb = DOWNCONVERT ? -residual_ext : residual_ext;
+    assign z0_comb = downconvert ? -residual_ext : residual_ext;
 
     // -- accept: latch the CORDIC's operands the cycle the sample lands ----
     logic signed [CORDIC_BITS-1:0] x0_reg, y0_reg;

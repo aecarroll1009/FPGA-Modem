@@ -5,6 +5,14 @@
 // the same mix_i/mix_q vectors the parallel testbench uses. If the serialised
 // interface loses, reorders, or misaligns a byte, this fails.
 //
+// The direction pin is toggled every sample, so RX and TX rotations interleave
+// through the one rotator. That is the case a build-time parameter could not
+// have expressed, and it is also the one that catches a mistimed capture: the
+// pin is driven to the opposite value the instant each byte has been taken, so
+// the only clock on which it is correct is the one the last sample byte lands.
+// A wrapper that read the pin when the core starts, rather than latching it
+// with the frame, fails every sample here.
+//
 // It also measures the cost of serialisation, which is the reason the wrapper
 // exists: bytes moved per sample versus clocks per sample.
 //
@@ -48,6 +56,14 @@ module tb_tt_um_cordic_ddc #(
     logic signed [DATA_BITS-1:0] stim_q [0:N_STIM-1];
     logic signed [MIX_BITS-1:0]  mix_i_exp [0:N_STIM-1];
     logic signed [MIX_BITS-1:0]  mix_q_exp [0:N_STIM-1];
+    logic signed [MIX_BITS-1:0]  up_i_exp  [0:N_STIM-1];
+    logic signed [MIX_BITS-1:0]  up_q_exp  [0:N_STIM-1];
+
+    // Sample i is down-converted when even. Both processes derive the
+    // direction from the loop index alone, so they cannot disagree.
+    function automatic logic want_down(input int i);
+        want_down = (i % 2 == 0);
+    endfunction
 
     int n_fail = 0;
     int bytes_in = 0, bytes_out = 0;
@@ -59,16 +75,20 @@ module tb_tt_um_cordic_ddc #(
     always @(posedge clk) clocks <= clocks + 1;
     int t_start, t_end;
 
-    // Send one byte, holding it until the DUT can take it.
-    task automatic send_byte(input logic [7:0] b, input logic is_cfg);
+    // Send one byte, holding it until the DUT can take it. `dir` is presented
+    // on the direction pin for exactly the clock the byte lands and inverted
+    // immediately after, so nothing but a capture on that edge can be right.
+    task automatic send_byte(input logic [7:0] b, input logic is_cfg, input logic dir);
         begin
             if (!is_cfg) while (!i_ready) @(posedge clk);
             ui_in     = b;
             uio_in[0] = 1'b1;
             uio_in[1] = is_cfg;
+            uio_in[5] = dir;
             @(posedge clk);
             uio_in[0] = 1'b0;
             uio_in[1] = 1'b0;
+            uio_in[5] = !dir;
             bytes_in++;
         end
     endtask
@@ -97,17 +117,19 @@ module tb_tt_um_cordic_ddc #(
     initial begin
         $readmemh({VEC_DIR, "/stim_i.hex"}, stim_i);
         $readmemh({VEC_DIR, "/stim_q.hex"}, stim_q);
-        $readmemh({VEC_DIR, "/mix_i.hex"},  mix_i_exp);
-        $readmemh({VEC_DIR, "/mix_q.hex"},  mix_q_exp);
+        $readmemh({VEC_DIR, "/mix_i.hex"},    mix_i_exp);
+        $readmemh({VEC_DIR, "/mix_q.hex"},    mix_q_exp);
+        $readmemh({VEC_DIR, "/mix_up_i.hex"}, up_i_exp);
+        $readmemh({VEC_DIR, "/mix_up_q.hex"}, up_q_exp);
 
         ui_in = '0; uio_in = '0; rst_n = 0;
         repeat (4) @(posedge clk);
         rst_n = 1;
         @(posedge clk);
 
-        // Config: PHASE_INC, big-endian.
+        // Config: PHASE_INC, big-endian. Config bytes carry no direction.
         for (int b = CfgBytes - 1; b >= 0; b--)
-            send_byte(PHASE_INC[b*8 +: 8], 1'b1);
+            send_byte(PHASE_INC[b*8 +: 8], 1'b1, 1'b1);
 
         t_start = clocks;
 
@@ -120,27 +142,30 @@ module tb_tt_um_cordic_ddc #(
                 for (int i = 0; i < N_TEST; i++) begin
                     // Sample frame: xi then xq, each big-endian.
                     for (int b = (DATA_BITS/8) - 1; b >= 0; b--)
-                        send_byte(stim_i[i][b*8 +: 8], 1'b0);
+                        send_byte(stim_i[i][b*8 +: 8], 1'b0, want_down(i));
                     for (int b = (DATA_BITS/8) - 1; b >= 0; b--)
-                        send_byte(stim_q[i][b*8 +: 8], 1'b0);
+                        send_byte(stim_q[i][b*8 +: 8], 1'b0, want_down(i));
                 end
             end
 
             begin : consumer
+                logic signed [MIX_BITS-1:0] exp_i, exp_q;
                 for (int i = 0; i < N_TEST; i++) begin
                     recv_frame();
                     got_i = rx_word[OutBits-1 -: MIX_BITS];
                     got_q = rx_word[MIX_BITS-1 : 0];
 
-                    if (got_i !== mix_i_exp[i] || got_q !== mix_q_exp[i]) begin
+                    exp_i = want_down(i) ? mix_i_exp[i] : up_i_exp[i];
+                    exp_q = want_down(i) ? mix_q_exp[i] : up_q_exp[i];
+
+                    if (got_i !== exp_i || got_q !== exp_q) begin
                         n_fail++;
                         if (n_fail <= 5) begin
-                            $display("FAIL sample %0d: xi=%0d xq=%0d",
-                                     i, stim_i[i], stim_q[i]);
-                            $display("  expected mix_i=%0d mix_q=%0d",
-                                     mix_i_exp[i], mix_q_exp[i]);
-                            $display("  got      mix_i=%0d mix_q=%0d",
-                                     got_i, got_q);
+                            $display("FAIL sample %0d (%s): xi=%0d xq=%0d",
+                                     i, want_down(i) ? "down" : "up",
+                                     stim_i[i], stim_q[i]);
+                            $display("  expected mix_i=%0d mix_q=%0d", exp_i, exp_q);
+                            $display("  got      mix_i=%0d mix_q=%0d", got_i, got_q);
                         end
                     end
                 end
@@ -159,6 +184,8 @@ module tb_tt_um_cordic_ddc #(
                  8, 8, 8, uio_oe);
         $display("per sample: %0d bytes in, %0d bytes out, %0.1f clocks",
                  SampBytes, OutBytes, real'(t_end - t_start) / real'(N_TEST));
+        $display("direction: alternating per sample (%0d down, %0d up)",
+                 (N_TEST + 1) / 2, N_TEST / 2);
         if (n_fail == 0)
             $display("ALL %0d SERIALISED SAMPLES PASSED", N_TEST);
         else

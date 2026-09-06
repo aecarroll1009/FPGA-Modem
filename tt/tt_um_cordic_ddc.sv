@@ -19,7 +19,12 @@
 //   uio_out[2]    o_valid       out: uo_out holds a valid byte this clock
 //   uio_out[3]    i_ready       out: a sample byte may be sent this clock
 //   uio_out[4]    o_ovf         out: sticky -- a result was overwritten unread
-//   uio[7:5]      unused, driven low
+//   uio_in[5]     i_down        in:  1 = down-convert (RX), 0 = up-convert (TX)
+//   uio[7:6]      unused, driven low
+//
+// i_down is a pin rather than a config-register bit because the direction is
+// per-sample: it is sampled on the clock the last sample byte lands, so a host
+// can interleave RX and TX samples through the one rotator if it wants to.
 //
 // -- framing ----------------------------------------------------------------
 // All multi-byte values are big-endian (most significant byte first).
@@ -68,16 +73,22 @@ module tt_um_cordic_ddc #(
     // ena is high whenever this design is selected; nothing here needs to
     // gate on it, so it is intentionally unused.
     wire _unused_ena = ena;
-    wire [2:0] _unused_uio = uio_in[7:5];
+    wire [1:0] _unused_uio = uio_in[7:6];
 
     wire i_valid = uio_in[0];
     wire i_cfg   = uio_in[1];
+    wire i_down  = uio_in[5];
 
     // -- input: one shift register serves both config and sample bytes ------
     // They never overlap, so sharing costs nothing and saves a register.
     logic [SampBits-1:0]   in_sr;
     logic [PHASE_BITS-1:0] phase_inc;
     logic [SampCntW-1:0]   samp_cnt;
+    // Latched alongside the last sample byte. ddc_in_valid is registered, so
+    // it asserts one clock after that byte lands and the i_down pin may have
+    // moved on by then -- the same reason xi/xq are read from in_sr and not
+    // from ui_in.
+    logic                  down_reg;
 
     logic                  ddc_in_valid;
     wire                   ddc_busy;
@@ -101,6 +112,7 @@ module tt_um_cordic_ddc #(
             in_sr        <= '0;
             phase_inc    <= '0;
             samp_cnt     <= '0;
+            down_reg     <= 1'b1;
             ddc_in_valid <= 1'b0;
         end else begin
             ddc_in_valid <= 1'b0;
@@ -113,6 +125,7 @@ module tt_um_cordic_ddc #(
                     in_sr <= {in_sr[SampBits-9:0], ui_in};
                     if (samp_last) begin
                         samp_cnt     <= '0;
+                        down_reg     <= i_down;
                         ddc_in_valid <= 1'b1;
                     end else begin
                         samp_cnt <= samp_cnt + 1'b1;
@@ -138,16 +151,17 @@ module tt_um_cordic_ddc #(
         .CORDIC_BITS      (CORDIC_BITS),
         .MIX_BITS         (MIX_BITS)
     ) u_ddc (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .phase_inc (phase_inc),
-        .in_valid  (ddc_in_valid),
-        .xi        (xi),
-        .xq        (xq),
-        .busy      (ddc_busy),
-        .out_valid (ddc_out_valid),
-        .mix_i     (mix_i),
-        .mix_q     (mix_q)
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .phase_inc   (phase_inc),
+        .downconvert (down_reg),
+        .in_valid    (ddc_in_valid),
+        .xi          (xi),
+        .xq          (xq),
+        .busy        (ddc_busy),
+        .out_valid   (ddc_out_valid),
+        .mix_i       (mix_i),
+        .mix_q       (mix_q)
     );
 
     // -- output: mux bytes straight out of the mixer's result registers -----

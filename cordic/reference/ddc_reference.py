@@ -242,20 +242,28 @@ def apply_quadrant_sincos(q, c, s):
     return cos.astype(np.int64), sin.astype(np.int64)
 
 
-def prerotate_conj(q, xi, xq):
-    """Multiply (xi + j*xq) by exp(-j*q*pi/2).
+def prerotate_conj(q, xi, xq, downconvert: bool = True):
+    """Multiply (xi + j*xq) by exp(-/+ j*q*pi/2), per the direction.
 
     Applies the quadrant part of the rotation before the CORDIC handles the
     residual. Being a multiple of 90 degrees, this needs only sign swaps.
 
+    Up-conversion wants exp(+j*q*pi/2), which is exp(-j*(-q)*pi/2), so
+    negating the quadrant mod 4 reaches it through the same four cases.
+    That is why the RTL needs one case table rather than two: the direction
+    is a select on the table's index, not a second table.
+
     Args:
         q: Quadrant, 0..3.
         xi, xq: Input I/Q samples.
+        downconvert: True to rotate by -q*pi/2, False by +q*pi/2.
 
     Returns:
-        The (i, q) input rotated by -q*pi/2.
+        The (i, q) input rotated by -/+ q*pi/2.
     """
     q = np.asarray(q, dtype=np.int64)
+    if not downconvert:
+        q = (-q) & 3
     conds = [q == 0, q == 1, q == 2, q == 3]
     i = np.select(conds, [xi, xq, -xi, -xq])
     Q = np.select(conds, [xq, -xi, -xq, xi])
@@ -699,22 +707,30 @@ class DDC:
             shr(pq, sh, c.shift_mode), c.data_bits
         )
 
-    def mix_fused(self, xi, xq, phase):
-        """Rotate the input vector by -theta directly: the rotation is the mix.
+    def mix_fused(self, xi, xq, phase, downconvert: bool = True):
+        """Rotate the input vector by -/+theta directly: the rotation is the mix.
 
         No complex multiplier at all. The CORDIC output carries the gain K,
-        removed later in the FIR coefficients.
+        removed later in the FIR/interpolator coefficients.
+
+        `downconvert` is a runtime input on silicon, not a build-time
+        parameter, since the taped-out part must serve both RX and TX. Both
+        values therefore have to be verified against this same model; a
+        parameter would let one of them reach the die unexercised.
 
         Args:
             xi, xq: Input I/Q samples, at data_bits.
             phase: Accumulator phase for each sample.
+            downconvert: True to rotate by -theta (RX), False by +theta (TX).
 
         Returns:
             A (i, q) tuple of mixed output, each at mix_bits.
         """
         c = self.cfg
         q, rem = quadrant_split(self.angle_word(phase), c.ang_bits)
-        ri, rq = prerotate_conj(q, np.asarray(xi, np.int64), np.asarray(xq, np.int64))
+        ri, rq = prerotate_conj(
+            q, np.asarray(xi, np.int64), np.asarray(xq, np.int64), downconvert
+        )
         # One guard bit for the K growth. The headroom this buys is against the
         # complex envelope, not the per-axis word: the rotation is exact only
         # while |xi + j*xq| <= 2/K ~= 1.21 x full scale, and arbitrary IQ can
@@ -724,8 +740,9 @@ class DDC:
         # and could not have reported anything anyway, since g leaves the
         # seeded value a factor of two inside cordic_bits by construction.
         g = c.cordic_bits - c.data_bits - 1
+        z0 = -rem if downconvert else rem
         x, y, _, n_rot = cordic_rotate(
-            ri << np.int64(g), rq << np.int64(g), -rem, self.atan,
+            ri << np.int64(g), rq << np.int64(g), z0, self.atan,
             c.cordic_bits, c.shift_mode,
         )
         self._fused_sat = n_rot
@@ -735,8 +752,60 @@ class DDC:
 
     # -- top level -------------------------------------------------------
 
+    def mix_stage(self, xi, xq=None, phase0: int = 0, downconvert: bool = True) -> dict:
+        """Run phase -> NCO -> mixer, stopping before the filter.
+
+        This is exactly the scope of the taped-out design: the FIR is not on
+        the die, so the mixer stage is what RTL vectors have to cover, in
+        both directions.
+
+        Args:
+            xi: Input I samples, at data_bits.
+            xq: Input Q samples, at data_bits. None for a real-valued input,
+                in which case Q is treated as zero.
+            phase0: Initial NCO phase.
+            downconvert: True for RX (rotate by -theta), False for TX (+theta).
+
+        Returns:
+            A dict of phase, cos, sin, mix_i, mix_q, stim_i, stim_q, and
+            n_mix_saturated.
+        """
+        c = self.cfg
+        xi = sat(np.asarray(xi, np.int64), c.data_bits)
+        xq = np.zeros_like(xi) if xq is None else sat(np.asarray(xq, np.int64), c.data_bits)
+        if xi.shape != xq.shape:
+            raise ValueError(f"I/Q length mismatch: {xi.shape} vs {xq.shape}")
+
+        ph = self.phase(len(xi), phase0)
+        cos, sin = self.nco(ph)
+        self._fused_sat = 0
+        if c.mix_arch == MIX_SEPARATE:
+            if not downconvert:
+                raise ValueError(
+                    "mix_arch='separate' models down-conversion only; the "
+                    "up-convert path exists solely in the fused architecture, "
+                    "which is what the RTL implements"
+                )
+            mi, mq = self.mix_separate(xi, xq, cos, sin)
+        else:
+            mi, mq = self.mix_fused(xi, xq, ph, downconvert)
+        n_mix_sat = self._fused_sat + would_saturate(mi, c.mix_bits) + would_saturate(
+            mq, c.mix_bits
+        )
+        return {
+            "phase": ph, "cos": cos, "sin": sin,
+            "mix_i": mi, "mix_q": mq,
+            "stim_i": xi, "stim_q": xq,
+            "n_mix_saturated": n_mix_sat,
+        }
+
     def run(self, xi, xq=None, phase0: int = 0) -> dict:
         """Run the full DDC over a stimulus.
+
+        Down-convert only: the decimating FIR that follows the mixer is the
+        RX filter. The TX chain interpolates *before* the mixer, so it is not
+        this function with a flag flipped; use mix_stage() for the TX mixer
+        until the interpolator exists.
 
         Args:
             xi: Input I samples, at data_bits.
@@ -749,32 +818,13 @@ class DDC:
             out_i, out_q, stim_i, stim_q, and n_saturated.
         """
         c = self.cfg
-        xi = sat(np.asarray(xi, np.int64), c.data_bits)
-        xq = np.zeros_like(xi) if xq is None else sat(np.asarray(xq, np.int64), c.data_bits)
-        if xi.shape != xq.shape:
-            raise ValueError(f"I/Q length mismatch: {xi.shape} vs {xq.shape}")
-
-        ph = self.phase(len(xi), phase0)
-        cos, sin = self.nco(ph)
-        self._fused_sat = 0
-        if c.mix_arch == MIX_SEPARATE:
-            mi, mq = self.mix_separate(xi, xq, cos, sin)
-        else:
-            mi, mq = self.mix_fused(xi, xq, ph)
-        n_mix_sat = self._fused_sat + would_saturate(mi, c.mix_bits) + would_saturate(
-            mq, c.mix_bits
-        )
+        m = self.mix_stage(xi, xq, phase0, downconvert=True)
         yi, yq, n_sat = fir_decimate(
-            mi, mq, self.coef, c.decim, c.coef_bits, c.acc_bits, c.out_bits, c.shift_mode
+            m["mix_i"], m["mix_q"], self.coef, c.decim, c.coef_bits, c.acc_bits,
+            c.out_bits, c.shift_mode,
         )
-        n_sat += n_mix_sat
-        return {
-            "phase": ph, "cos": cos, "sin": sin,
-            "mix_i": mi, "mix_q": mq,
-            "out_i": yi, "out_q": yq,
-            "stim_i": xi, "stim_q": xq,
-            "n_saturated": n_sat,
-        }
+        n_sat += m.pop("n_mix_saturated")
+        return {**m, "out_i": yi, "out_q": yq, "n_saturated": n_sat}
 
 
 # --------------------------------------------------------------------------
@@ -807,6 +857,32 @@ def ddc_ideal(xi, xq, cfg: DDCConfig, h: np.ndarray, phase0: int = 0):
     # the two models stay sample-aligned.
     y = np.convolve(x * np.exp(-1j * ph), h, mode="valid")[:: cfg.decim]
     return y
+
+
+def mix_ideal(xi, xq, cfg: DDCConfig, phase0: int = 0, downconvert: bool = True):
+    """Compute the float64 mixer output: K * x * exp(-/+ j*theta), unfiltered.
+
+    The K is kept rather than divided out, because the fixed-point mixer's
+    output carries it -- the 1/K correction lives downstream in the filter
+    coefficients. Comparing against a K-free reference would report the gain
+    as error and hide everything smaller.
+
+    Args:
+        xi, xq: Input I/Q samples, integers at cfg.data_bits.
+        cfg: The DDC configuration.
+        phase0: Initial NCO phase.
+        downconvert: True to rotate by -theta, False by +theta.
+
+    Returns:
+        The normalised complex mixer output, one value per input sample.
+    """
+    x = (np.asarray(xi, float) + 1j * np.asarray(xq, float)) / full_scale(cfg.data_bits)
+    n = np.arange(len(x))
+    ph = 2 * np.pi * cfg.f_lo_actual / cfg.fs_in * n + 2 * np.pi * phase0 / (
+        1 << cfg.phase_bits
+    )
+    sign = -1.0 if downconvert else 1.0
+    return cfg.k_gain * x * np.exp(sign * 1j * ph)
 
 
 # --------------------------------------------------------------------------
@@ -994,6 +1070,15 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
         "out_q.hex": (r["out_q"], c.out_bits),
         "fir_coef.hex": (ddc.coef, c.coef_bits),
     }
+
+    # The up-convert direction, over the same stimulus and the same phase0, so
+    # a testbench can flip the direction input mid-stream and check both
+    # against one stimulus set. Only the fused mixer has an up-convert path.
+    up = None
+    if c.mix_arch == MIX_FUSED:
+        up = ddc.mix_stage(xi, xq, downconvert=False)
+        files["mix_up_i.hex"] = (up["mix_i"], c.mix_bits)
+        files["mix_up_q.hex"] = (up["mix_q"], c.mix_bits)
     _write_hex_files(out_dir, files)
 
     svh = os.path.join(out_dir, "ddc_params.svh")
@@ -1011,6 +1096,7 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
             "n_input_samples": n,
             "n_output_samples": len(r["out_i"]),
             "n_saturated": r["n_saturated"],
+            "n_saturated_upconvert": None if up is None else up["n_mix_saturated"],
         },
         "files": sorted(files) + ["ddc_params.svh"],
     }

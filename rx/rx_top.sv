@@ -67,16 +67,19 @@ module rx_top #(
         .CORDIC_BITS      (CORDIC_BITS),
         .MIX_BITS         (MIX_BITS)
     ) u_ddc (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .phase_inc (phase_inc),
-        .in_valid  (in_valid),
-        .xi        (adc_i),
-        .xq        (adc_q),
-        .busy      (busy),
-        .out_valid (mix_valid),
-        .mix_i     (mix_i),
-        .mix_q     (mix_q)
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .phase_inc   (phase_inc),
+        // This top level is the RX chain, so the shared front end is tied to
+        // down-convert here. The TT wrapper drives it from a pin instead.
+        .downconvert (1'b1),
+        .in_valid    (in_valid),
+        .xi          (adc_i),
+        .xq          (adc_q),
+        .busy        (busy),
+        .out_valid   (mix_valid),
+        .mix_i       (mix_i),
+        .mix_q       (mix_q)
     );
 
     // -- egress ------------------------------------------------------------
