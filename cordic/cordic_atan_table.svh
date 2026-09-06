@@ -4,13 +4,16 @@
 `define CORDIC_ATAN_TABLE_SVH
 
 `define CORDIC_N_ITER 16
-`define CORDIC_ANG_BITS 18
+`define CORDIC_ANG_BITS 17
+// The width the vectors were generated at. Testbenches take it from here
+// rather than restating it, so a width change cannot silently invalidate them.
+`define CORDIC_WIDTH 18
 
 // atan(2^-i) in angle LSBs, i = 0..N_ITER-1. A full circle is 2**ANG_BITS.
 // Sized to ANG_BITS, matching the angle path it feeds -- not a generic int,
 // so it combines with z_reg without an implicit width change.
 localparam logic signed [`CORDIC_ANG_BITS-1:0] CORDIC_ATAN_TABLE [0:`CORDIC_N_ITER-1] = '{
-    32768, 19344, 10221, 5188, 2604, 1303, 652, 326, 163, 81, 41, 20, 10, 5, 3, 1
+    16384, 9672, 5110, 2594, 1302, 652, 326, 163, 81, 41, 20, 10, 5, 3, 1, 1
 };
 
 `endif

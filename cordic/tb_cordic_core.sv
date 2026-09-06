@@ -18,7 +18,9 @@ module tb_cordic_core #(
     parameter string VEC_DIR     = "build/cordic_vectors"
 );
 
-    localparam int WIDTH = 20;
+    // From the generated header, not restated -- the vectors this testbench
+    // reads were produced at exactly this width.
+    localparam int WIDTH = `CORDIC_WIDTH;
 
     logic clk = 0;
     logic rst_n;

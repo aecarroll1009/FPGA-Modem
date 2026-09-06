@@ -438,11 +438,16 @@ class DDCConfig:
     fir_cutoff: float = 100_000.0
     n_taps: int = 63
 
-    phase_bits: int = 32  # M: accumulator width -> frequency resolution
+    # Widths are trimmed for the TinyTapeout target, where flip-flops are the
+    # scarce resource. M=24 still places any LO to 0.14 Hz; ang_bits=17 is the
+    # floor at n_iter=16 (at 16 the last atan entries round to zero); and
+    # cordic_bits=18 measures *better* than 20, since fewer guard bits means
+    # fewer LSBs truncated at the output and floor-mode error is biased.
+    phase_bits: int = 24  # M: accumulator width -> frequency resolution
     phase_trunc_bits: int = 14  # N: phase bits that reach the angle path
-    ang_bits: int = 18  # CORDIC internal angle width (>= N, zero-padded)
+    ang_bits: int = 17  # CORDIC internal angle width (>= N, zero-padded)
     n_iter: int = 16
-    cordic_bits: int = 20  # datapath width inside the CORDIC (data + guard)
+    cordic_bits: int = 18  # datapath width inside the CORDIC (data + guard)
     data_bits: int = 16
     coef_bits: int = 16
     acc_bits: int = 40
@@ -1203,6 +1208,15 @@ def main(argv=None) -> int:
     p.add_argument("--n-iter", type=int, default=DDCConfig.n_iter)
     p.add_argument("--data-bits", type=int, default=DDCConfig.data_bits)
     p.add_argument("--cordic-bits", type=int, default=DDCConfig.cordic_bits)
+    p.add_argument("--phase-bits", type=int, default=DDCConfig.phase_bits,
+                   help="M: accumulator width, sets frequency resolution")
+    p.add_argument("--phase-trunc-bits", type=int, default=DDCConfig.phase_trunc_bits,
+                   help="N: phase bits reaching the angle path, sets spur floor")
+    p.add_argument("--ang-bits", type=int, default=DDCConfig.ang_bits,
+                   help="CORDIC internal angle width")
+    p.add_argument("--out-bits", type=int, default=DDCConfig.out_bits,
+                   help="output word width; keep in step with --data-bits or "
+                        "the SNR figure is measuring a scale mismatch")
     p.add_argument("--fs-in", type=float, default=DDCConfig.fs_in)
     p.add_argument("--f-lo", type=float, default=DDCConfig.f_lo)
     p.add_argument("--decim", type=int, default=DDCConfig.decim)
@@ -1213,6 +1227,8 @@ def main(argv=None) -> int:
             fs_in=a.fs_in, f_lo=a.f_lo, decim=a.decim,
             mix_arch=a.mix_arch, shift_mode=a.shift_mode, n_iter=a.n_iter,
             data_bits=a.data_bits, cordic_bits=a.cordic_bits,
+            phase_bits=a.phase_bits, phase_trunc_bits=a.phase_trunc_bits,
+            ang_bits=a.ang_bits, out_bits=a.out_bits,
         )
     except (ValueError, OverflowError) as e:
         print(f"error: {e}", file=sys.stderr)

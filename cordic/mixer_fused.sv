@@ -25,9 +25,9 @@
 
 module mixer_fused #(
     parameter int DATA_BITS   = 16,
-    parameter int CORDIC_BITS = 20,
+    parameter int CORDIC_BITS = 18,
     parameter int MIX_BITS    = 17,
-    parameter int ANG_BITS    = 18,
+    parameter int ANG_BITS    = 17,
     parameter bit DOWNCONVERT = 1'b1
 ) (
     input  logic                        clk,

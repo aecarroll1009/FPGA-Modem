@@ -11,11 +11,11 @@
 `timescale 1ns/1ps
 
 module ddc_frontend #(
-    parameter int PHASE_BITS       = 32,
+    parameter int PHASE_BITS       = 24,
     parameter int PHASE_TRUNC_BITS = 14,
-    parameter int ANG_BITS         = 18,
+    parameter int ANG_BITS         = 17,
     parameter int DATA_BITS        = 16,
-    parameter int CORDIC_BITS      = 20,
+    parameter int CORDIC_BITS      = 18,
     parameter int MIX_BITS         = 17
 ) (
     input  logic                        clk,

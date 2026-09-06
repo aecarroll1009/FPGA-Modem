@@ -564,7 +564,10 @@ def test_lo_quantization_is_reported_honestly():
 def test_m_and_n_are_independent_knobs():
     """M sets frequency resolution. N sets spectral purity, a separate concern."""
     c = DDCConfig()
-    assert c.phase_bits == 32 and c.phase_trunc_bits == 14
+    # The invariant, not the literal widths: the accumulator has to be wider
+    # than the phase that reaches the angle path, or there is no truncation to
+    # reason about in the first place.
+    assert c.phase_bits > c.phase_trunc_bits
 
     # M controls how exactly an LO can be placed...
     coarse = DDCConfig(phase_bits=16, phase_trunc_bits=14, ang_bits=14, n_iter=13,
@@ -696,7 +699,10 @@ def test_vectors_round_trip():
         json.load(open(os.path.join(d, "manifest.json")))
 
         svh = open(os.path.join(d, "ddc_params.svh")).read()
-        assert f"PHASE_INC = {cfg.phase_bits}'h{cfg.phase_inc:08x}" in svh
+        # Nibbles follow the word width rather than being fixed at 8, so this
+        # keeps checking the emitted literal when phase_bits changes.
+        nib = (cfg.phase_bits + 3) // 4
+        assert f"PHASE_INC = {cfg.phase_bits}'h{cfg.phase_inc:0{nib}x}" in svh
         assert f"localparam int N_ITER      = {cfg.n_iter};" in svh
         assert "`endif" in svh
         print(f"vectors round-trip ({len(man['files'])} files) OK")

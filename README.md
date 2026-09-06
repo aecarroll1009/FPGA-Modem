@@ -72,10 +72,10 @@ parts only do better), Quartus Lite 17.0, constrained at 50 MHz:
 
 | | | |
 |---|---|---|
-| Fmax (slow 1100 mV 85 °C) | **106.96 MHz** | vs 45.6 MHz required — 2.3× margin |
-| Setup / hold slack | +10.651 ns / +0.260 ns | at the 20 ns constraint |
-| Logic | 257 ALMs | 1% of 18,480 |
-| Registers | 189 | |
+| Fmax (slow 1100 mV 85 °C) | **102.84 MHz** | vs 45.6 MHz required — 2.3× margin |
+| Setup / hold slack | +10.276 ns / +0.245 ns | at the 20 ns constraint |
+| Logic | 238 ALMs | 1% of 18,480 |
+| Registers | 175 | |
 | DSP blocks | **0** | of 66 |
 | Block memory | 0 bits | |
 
@@ -89,6 +89,38 @@ time-sharing a single one.
 The top level's egress is a stub — a valid/ready IQ stream with the I/O false-pathed in
 `syn/rx_top.sdc` — so these are core-datapath numbers. Real I/O constraints arrive with
 the physical link.
+
+## TinyTapeout
+
+The NCO + fused mixer are meant for a TinyTapeout shuttle; the FPGA flow above is a
+prototyping and verification vehicle, not the deliverable. `tt/tt_um_cordic_ddc.sv` is the
+wrapper, checked by `./tt/run_sim_tt.sh` against the same reference vectors the parallel
+testbench uses, so the serialisation is verified rather than assumed.
+
+**The FIR is not in scope for silicon.** A 63-tap filter needs a 63-deep × 17-bit sample
+delay line — over a thousand flip-flops, larger than this entire design — plus coefficient
+storage. It stays on the FPGA or the host. What tapes out is the part that is actually
+novel: a CORDIC that is simultaneously the NCO and the mixer.
+
+**I/O is the binding constraint, not area.** TinyTapeout provides 8 dedicated inputs, 8
+dedicated outputs and 8 bidirectional pins. The parallel core needs 65 input and 36 output
+bits, so it cannot be pinned out directly and the interface is byte-serial:
+
+| | bits | bytes |
+|---|---|---|
+| config: `phase_inc` (once, not per sample) | 24 | 3 |
+| in: `xi`, `xq` | 32 | 4 |
+| out: `mix_i`, `mix_q` | 34 | 5 |
+
+Serialisation is *nearly* free, because the iterative CORDIC already spends 19 clocks per
+sample and the byte traffic hides inside that. Input and output use separate ports, so
+they overlap; measured cost is **22 clocks per sample against the core's 19**, i.e. three
+clocks of overhead, not nine. `i_ready` is deliberately not gated on the output frame —
+doing so serialises the two directions and costs about five clocks a sample.
+
+At a 50 MHz TinyTapeout clock, 22 clocks/sample is **2.27 MS/s**. Getting to ~20 would
+need an input holding register so the next sample can accumulate during a rotation, which
+costs 32 flip-flops — deliberately not spent, since area is what binds here.
 
 ## Verification
 
@@ -110,8 +142,9 @@ Measured at the default 16-bit config (`--report`):
 
 | | SNR | SFDR | ENOB |
 |---|---|---|---|
-| NCO alone | 91.6 dB | 93.3 dB | — |
-| DDC (fused mixer) | 79.2 dB | 82.8 dB | 12.86 |
+| NCO alone | 91.6 dB | 99.3 dB | — |
+| NCO at an LO that exercises the N-bit truncation | — | 84.3 dB | — |
+| DDC (fused mixer) | 80.4 dB | 83.8 dB | 13.06 |
 
 ### Design facts from the reference model
 
@@ -121,28 +154,41 @@ carries the K, with no free CORDIC seed value to fold it into, so the 1/K correc
 in the FIR/interpolator coefficients instead.
 
 That guard bit is sized against the *complex envelope*, not the per-axis word, and the two
-differ by up to √2. The CORDIC datapath holds 2^19−1 and the input is shifted left by
-`Guard = 3`, so the rotation stays exact only while |xi + j·xq| ≤ (2^19−1)/(K·2³) ≈ **1.21
-× full scale**. A rotating tone sits at exactly 1.0 × full scale and is safe. Arbitrary IQ
-— a QPSK corner point, or two tones summing in phase — reaches √2 ≈ 1.41 × full scale and
-clips inside the CORDIC. This matters most on TX, whose input *is* arbitrary IQ: budget
-the interpolator's output backoff against 1.21, not 1.0.
+differ by up to √2. The rotation stays exact only while
+|xi + j·xq| ≤ (2^(cordic_bits−1) − 1)/(K·2^Guard) ≈ **1.21 × full scale**. A rotating tone
+sits at exactly 1.0 × full scale and is safe. Arbitrary IQ — a QPSK corner point, or two
+tones summing in phase — reaches √2 ≈ 1.41 × full scale and clips inside the CORDIC. This
+matters most on TX, whose input *is* arbitrary IQ: budget the interpolator's output
+backoff against 1.21, not 1.0.
+
+That 1.21 is **invariant under `cordic_bits`**, which is not obvious. `Guard` is defined as
+`cordic_bits − data_bits − 1`, so `2^(cordic_bits−1)/2^Guard` is always `2^data_bits`, and
+the limit collapses to `2/K` regardless of datapath width. Widening the CORDIC buys
+internal precision, never headroom — only `data_bits` moves the clipping point.
 
 Only fully-loaded filter outputs are real outputs. Hardware never produces the `n_taps-1`
 tail samples where a filter runs off the end of its input buffer, so the model uses
 valid-only convolution to match.
 
-### NCO widths: M = 32, N = 14
+### NCO widths: M = 24, N = 14
 
 Three separate numbers, and conflating them loses information:
 
-- **M = 32** (`phase_bits`) — accumulator width. Sets frequency resolution, fs/2^M =
-  0.56 mHz at 2.4 MS/s. Any LO is placed essentially exactly.
+- **M = 24** (`phase_bits`) — accumulator width. Sets frequency resolution, fs/2^M =
+  0.14 Hz at 2.4 MS/s. Any LO is placed essentially exactly.
 - **N = 14** (`phase_trunc_bits`) — phase bits reaching the angle path. Sets spectral
   purity. Truncating M→N discards information every sample, and the error is periodic, so
   it shows up as discrete spurs: worst-case bound ~6.02·N = 84 dBc. Nothing downstream
-  buys past it.
-- **`ang_bits` = 18** — the CORDIC's internal angle register, wider than N with the
+  buys past it. N costs no flip-flops at all — it is a bit slice, not a register — so
+  there is never an area reason to trim it.
+- **`ang_bits` = 17** — the CORDIC's internal angle register, wider than N with the
   truncated phase zero-padded into it, so the rotation converges on the truncated angle
-  instead of quantising it a second time. Using N as the z width too would cap useful
-  iterations at 13, since past that the atan entries round to zero.
+  instead of quantising it a second time. 17 is the floor at `n_iter = 16`: at 16 the last
+  atan entries round to zero and those iterations stop doing anything.
+
+These are trimmed from an earlier 32/14/18 because the TinyTapeout target makes flip-flops
+the scarce resource. Dropping M 32→24 costs only LO placement precision — 0.56 mHz to
+0.14 Hz, both far finer than any modem needs — and nothing in SNR or SFDR, because spectral
+purity is N's job. Narrowing `cordic_bits` 20→18 alongside them *improved* SNR by 1.16 dB:
+fewer guard bits means fewer LSBs discarded by the output shift, and floor-mode truncation
+error is biased rather than symmetric, so less of it accumulates.

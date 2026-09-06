@@ -22,17 +22,21 @@ if _REFERENCE_DIR not in sys.path:
 
 import ddc_reference as G
 
-N_ITER = 16
-ANG_BITS = 18
-WIDTH = 20
+# Derived from the reference model's config rather than restated, so the atan
+# table and the DDC can never be generated against different widths. Changing
+# a width in DDCConfig is enough; rerun this script and the table follows.
+N_ITER = G.DDCConfig.n_iter
+ANG_BITS = G.DDCConfig.ang_bits
+WIDTH = G.DDCConfig.cordic_bits
 
 
-def render_atan_table_svh(n_iter, ang_bits):
+def render_atan_table_svh(n_iter, ang_bits, width):
     """Render the CORDIC atan table as a SystemVerilog include file.
 
     Args:
         n_iter: Number of CORDIC iterations.
         ang_bits: Angle word width; a full circle is 2**ang_bits.
+        width: CORDIC datapath width for x and y.
 
     Returns:
         The contents of cordic_atan_table.svh as a string.
@@ -46,6 +50,9 @@ def render_atan_table_svh(n_iter, ang_bits):
 
 `define CORDIC_N_ITER {n_iter}
 `define CORDIC_ANG_BITS {ang_bits}
+// The width the vectors were generated at. Testbenches take it from here
+// rather than restating it, so a width change cannot silently invalidate them.
+`define CORDIC_WIDTH {width}
 
 // atan(2^-i) in angle LSBs, i = 0..N_ITER-1. A full circle is 2**ANG_BITS.
 // Sized to ANG_BITS, matching the angle path it feeds -- not a generic int,
@@ -213,7 +220,7 @@ def main(argv=None):
 
     svh_path = os.path.join(_HERE, "cordic_atan_table.svh")
     with open(svh_path, "w", newline="\n") as f:
-        f.write(render_atan_table_svh(N_ITER, ANG_BITS))
+        f.write(render_atan_table_svh(N_ITER, ANG_BITS, WIDTH))
     print(f"wrote {svh_path}")
 
     cases = build_vectors(n_each=a.n_each, seed=a.seed)

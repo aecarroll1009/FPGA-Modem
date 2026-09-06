@@ -20,7 +20,7 @@
 `include "cordic_atan_table.svh"
 
 module cordic_core #(
-    parameter int WIDTH = 20   // datapath width for x and y
+    parameter int WIDTH = 18   // datapath width for x and y
 ) (
     input  logic                             clk,
     input  logic                             rst_n,

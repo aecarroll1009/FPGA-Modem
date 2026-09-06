@@ -20,9 +20,9 @@
 `timescale 1ns/1ps
 
 module nco #(
-    parameter int PHASE_BITS       = 32,  // M: accumulator width
+    parameter int PHASE_BITS       = 24,  // M: accumulator width
     parameter int PHASE_TRUNC_BITS = 14,  // N: phase bits reaching the angle path
-    parameter int ANG_BITS         = 18   // CORDIC angle width, N zero-padded into it
+    parameter int ANG_BITS         = 17   // CORDIC angle width, N zero-padded into it
 ) (
     input  logic                      clk,
     input  logic                      rst_n,
