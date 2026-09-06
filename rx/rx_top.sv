@@ -8,17 +8,17 @@
 // bridge) is not chosen yet, so the output is a plain valid/ready stream and
 // syn/rx_top.sdc false-paths the I/O. Real I/O constraints arrive with the PHY.
 //
-// The decimating FIR is not in the datapath yet -- mixer output currently goes
-// straight to the egress stream, so this build measures the CORDIC path alone.
-// The FIR inserts between u_ddc and the output, narrowing MIX_BITS to OUT_BITS
-// and dropping the sample rate by DECIM.
+// Mixer output feeds the decimating FIR, whose own out_valid drives the
+// egress stream at fs_in/DECIM. The FIR has no backpressure input either --
+// same reasoning as the mixer below -- so overflow is checked once, at the
+// egress stream, which is the only place a real consumer can actually stall.
 //
-// Backpressure: ddc_frontend cannot be stalled once it has accepted a sample,
-// so out_ready does NOT gate the datapath -- it is an observation point, not a
-// brake. A consumer that deasserts out_ready while out_valid is high loses that
-// sample and latches out_overflow. Keeping up is a system requirement (the
-// budget is in the README); out_overflow is how a violation becomes visible
-// instead of silently corrupting the band.
+// Backpressure: neither ddc_frontend nor fir_decimate can be stalled once
+// they have accepted a sample, so out_ready does NOT gate the datapath -- it
+// is an observation point, not a brake. A consumer that deasserts out_ready
+// while out_valid is high loses that sample and latches out_overflow. Keeping
+// up is a system requirement (the budget is in the README); out_overflow is
+// how a violation becomes visible instead of silently corrupting the band.
 
 `timescale 1ns/1ps
 
@@ -28,7 +28,10 @@ module rx_top #(
     parameter int ANG_BITS         = 17,
     parameter int DATA_BITS        = 16,
     parameter int CORDIC_BITS      = 18,
-    parameter int MIX_BITS         = 17
+    parameter int MIX_BITS         = 17,
+    parameter int DECIM            = 8,
+    parameter int ACC_BITS         = 40,
+    parameter int OUT_BITS         = 16
 ) (
     input  logic                        clk,
     input  logic                        rst_n,
@@ -45,11 +48,13 @@ module rx_top #(
     input  logic signed [DATA_BITS-1:0] adc_i,
     input  logic signed [DATA_BITS-1:0] adc_q,
 
-    // Baseband IQ egress (stub interface -- see the header note).
+    // Baseband IQ egress (stub interface -- see the header note). Runs at
+    // fs_in/DECIM, not fs_in -- one valid pulse per FIR output, not per
+    // mixer output.
     output logic                        out_valid,
     input  logic                        out_ready,
-    output logic signed [MIX_BITS-1:0]  iq_i,
-    output logic signed [MIX_BITS-1:0]  iq_q,
+    output logic signed [OUT_BITS-1:0]  iq_i,
+    output logic signed [OUT_BITS-1:0]  iq_q,
     output logic                        out_overflow
 );
 
@@ -83,10 +88,28 @@ module rx_top #(
     );
 
     // -- egress ------------------------------------------------------------
-    // The decimating FIR goes here.
-    assign out_valid = mix_valid;
-    assign iq_i      = mix_i;
-    assign iq_q      = mix_q;
+    logic fir_valid;
+    logic signed [OUT_BITS-1:0] fir_i, fir_q;
+
+    fir_decimate #(
+        .IN_BITS  (MIX_BITS),
+        .DECIM    (DECIM),
+        .ACC_BITS (ACC_BITS),
+        .OUT_BITS (OUT_BITS)
+    ) u_fir (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .in_valid  (mix_valid),
+        .xi        (mix_i),
+        .xq        (mix_q),
+        .out_valid (fir_valid),
+        .out_i     (fir_i),
+        .out_q     (fir_q)
+    );
+
+    assign out_valid = fir_valid;
+    assign iq_i      = fir_i;
+    assign iq_q      = fir_q;
 
     // Sticky: a consumer that could not take a sample dropped it.
     always_ff @(posedge clk or negedge rst_n) begin

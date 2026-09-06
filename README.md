@@ -30,12 +30,13 @@ handed off to GNU Radio for the actual demod/mod work.
   mixer, rotating by −θ when `downconvert` is high (RX) and by +θ when it is low (TX).
   Both directions run the same 16 iterations through the same adders, so they cost the
   same and neither is a slow path.
-- **Decimating FIR** — the RX-side filter: one 63-tap linear-phase lowpass decimating by
-  8, with the CORDIC gain K ≈ 1.6467 folded into its coefficients rather than spent on a
-  separate scaling stage. Deliberately not a CIC — a CIC earns its keep at decimation
-  factors in the tens or hundreds, where its multiplier-free structure beats a long FIR.
-  At ÷8 it would save little and cost passband droop that needs a compensating FIR
-  afterward anyway.
+- **Decimating FIR** (`rx/fir_decimate.sv`) — the RX-side filter: one 63-tap linear-phase
+  lowpass decimating by 8, with the CORDIC gain K ≈ 1.6467 folded into its coefficients
+  rather than spent on a separate scaling stage. Deliberately not a CIC — a CIC earns its
+  keep at decimation factors in the tens or hundreds, where its multiplier-free structure
+  beats a long FIR. At ÷8 it would save little and cost passband droop that needs a
+  compensating FIR afterward anyway. Exploits the filter's own linear-phase symmetry
+  (`h[k] == h[62-k]`) to halve the multiply count — see the rate budget below.
 - **Interpolating filter** — the TX-side counterpart, upsampling ahead of the CORDIC.
   Also where TX's 1/K correction goes, since on TX the filter precedes the mixer.
 - **GNU Radio** — off-chip, file-based, handles demodulation and modulation.
@@ -55,13 +56,17 @@ mixer handshake changes, since both move every budget below:
 | Mixer outputs | 2.4 MS/s | one per 19 clocks |
 | FIR outputs (÷8) | 300 kS/s | 152 clocks per I/Q output pair |
 
-Two consequences worth stating up front. First, the 63-tap FIR has to fit its multiply
-work inside 152 clocks; at one multiplier shared between I and Q that is 126 MACs, or 83%
-of the budget before any overhead, which is why the FIR uses a multiplier per rail
-instead. Second, 19 clocks/sample is a ceiling on input rate: 2.4 MS/s needs 45.6 MHz and
-scales linearly, so a 10 MS/s capture would demand 190 MHz. If the input rate ever rises
-that far, the fix is to unroll the CORDIC into 16 pipeline stages for one sample per
-clock, trading ~16× the adders for the rate — not to push the clock.
+Two consequences worth stating up front. First, the FIR's 63 taps fold around their own
+symmetry (`h[k] == h[62-k]`) into 32 multiply-accumulate steps per rail — one pre-add
+replaces one multiply, exact rather than approximate because the folded pair is only
+correct if the taps are precisely palindromic, which `fir_taps_quantized()` enforces at
+generation time. Run with one multiplier per rail (both rails computed in parallel, not
+time-shared — DSP blocks are abundant on this device, 2 of 66), that is 32 cycles against
+the 152-clock budget: **21%**, not the 83% an unfolded, rail-shared design would cost.
+Second, 19 clocks/sample is a ceiling on input rate: 2.4 MS/s needs 45.6 MHz and scales
+linearly, so a 10 MS/s capture would demand 190 MHz. If the input rate ever rises that
+far, the fix is to unroll the CORDIC into 16 pipeline stages for one sample per clock,
+trading ~16× the adders for the rate — not to push the clock.
 
 ## Synthesis
 
@@ -81,28 +86,37 @@ device cannot drift away from the RTL. Everything it writes goes to the gitignor
 Measured on a Cyclone V 5CEBA4F23C7 (speed grade 7 — the slow common grade, so the faster
 parts only do better), Quartus Lite 17.0, constrained at 50 MHz:
 
-| | `rx_top` | `tt_um_cordic_ddc` |
+| | `rx_top` (CORDIC + FIR) | `tt_um_cordic_ddc` (CORDIC only) |
 |---|---|---|
-| Fmax (slow 1100 mV 85 °C) | **102.84 MHz** | **102.81 MHz** |
-| Setup / hold slack | +10.276 / +0.245 ns | +10.273 / +0.236 ns |
-| Logic | 238 ALMs | 251 ALMs |
-| Registers | 175 | 255 |
-| DSP blocks | **0** | **0** |
-| Block memory | 0 bits | 0 bits |
+| Fmax (slow 1100 mV 85 °C) | **69.55 MHz** | **102.81 MHz** |
+| Setup / hold slack | +5.622 / +0.256 ns | +10.273 / +0.236 ns |
+| Logic | 375 ALMs | 251 ALMs |
+| Registers | 389 | 255 |
+| DSP blocks | **2** | **0** |
+| Block memory | 8,704 bits | 0 bits |
 
-Three things worth reading off that table. The rate budget is not close to binding — the
-front end has better than twice the 45.6 MHz it needs, so the iterative CORDIC is the right
-call at this sample rate and the unrolled version stays unnecessary. The CORDIC spends
-**no** DSP blocks, because shift-and-add is the whole point of it; all 66 multipliers are
-still free for the FIR, which is why the FIR can afford one per rail rather than
-time-sharing a single one.
+Three things worth reading off that table. The rate budget is not close to binding on
+either build — `rx_top`'s 69.55 MHz is still 1.53× the 45.6 MHz the CORDIC needs, so the
+iterative CORDIC remains the right call and the unrolled version stays unnecessary. The
+CORDIC itself still spends **no** DSP blocks, because shift-and-add is the whole point of
+it — `tt_um_cordic_ddc`, which is CORDIC-only, proves that in isolation; the 2 DSP blocks
+and 8,704 memory bits in `rx_top` are entirely the FIR's, one multiplier per rail plus its
+128-deep×4-copy delay line (see the rate budget above for why 2 multipliers, not 1).
 
-And the runtime direction is close to free. The two columns differ by 80 registers and 13
-ALMs, which is the byte-serial interface — shift registers, counters, the output frame
-state — not the direction bit; that is one flip-flop latching the pin with its sample, plus
-the select on two muxes that already existed. Fmax moves by 0.03 MHz, which is noise. In
-`rx_top` the port is tied to a constant and folds away entirely, so the FPGA build pays
-literally nothing for the chip's flexibility.
+And the runtime direction is close to free — compare `tt_um_cordic_ddc` against the
+CORDIC-only numbers from before the direction became a port (238 ALMs, 175 registers,
+102.84 MHz): +13 ALMs, +80 registers, essentially the byte-serial interface, not the
+direction bit itself, and Fmax barely moves. In `rx_top` the port is tied to a constant and
+folds away entirely, so the FPGA build pays literally nothing for the chip's flexibility.
+
+One synthesis lesson worth stating because it cost a real iteration: the FIR's delay line
+is four `logic ... mem[0:127]` arrays read combinationally. The first pass through Quartus
+came back at **0 block memory bits**, 4,630 ALMs, and Fmax nearly halved to 51.56 MHz —
+Quartus had built the arrays out of plain flip-flops with a 128:1 mux in front, since
+combinational reads cannot map onto M10K block RAM. Registering the reads (one pipeline
+stage inside the MAC engine) is what produced the 8,704-bit / 375-ALM numbers above; the
+data is now available a cycle later, which the 152-clock decimation budget does not
+notice. `fir_decimate.sv`'s header documents this exchange.
 
 The FPGA numbers are a *relative* measurement for the ASIC target, not an absolute one:
 ALMs are LUT-based and do not predict standard-cell area, and the CORDIC's barrel shifters
@@ -198,6 +212,25 @@ sample fails every case rather than passing by luck.
 The full TX chain is not verified yet, because it does not exist: TX interpolates *before*
 the mixer, and the interpolator is unbuilt. What is verified is the TX **mixer**, which is
 the part that tapes out.
+
+### The decimating FIR
+
+`rx/fir_decimate.sv` is checked two ways. `rx/run_sim_fir.sh` feeds `mix_i`/`mix_q` from
+the same vectors directly into the FIR and checks all 1017 outputs bit-exact against
+`fir_decimate()` — the filter in isolation, at the mixer's real 19-clocks-per-sample
+cadence (faster spacing would violate the MAC engine's one-run-at-a-time assumption, which
+is asserted in simulation rather than silently handled, since the real system never
+produces samples that fast). `rx/run_sim_rx_top.sh` then runs ADC-rate stimulus through the
+whole chain — mixer and FIR together — because neither of the other testbenches exercises
+the handshake between them; this is the one that would catch a `valid`/data timing mismatch
+neither block's own test could see. Both pass 1017/1017.
+
+The coefficient ROM is generated, not hand-copied: `rx/gen_fir_coef.py` reads the same
+quantized taps the reference model computes and writes `rx/fir_coef_table.svh`, checked
+into the repo alongside the RTL (the same pattern `cordic/cordic_atan_table.svh` uses).
+Since the RTL folds the filter around its own symmetry, only the first 32 of the 63 taps
+are needed; the generator re-checks the exact-symmetry property before halving the table,
+independently of the check the reference model already applies when it quantizes them.
 
 ### Design facts from the reference model
 

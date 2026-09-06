@@ -32,7 +32,7 @@ set common {
     rx/ddc_frontend.sv
 }
 set tops [dict create \
-    rx_top            [concat $common {rx/rx_top.sv}] \
+    rx_top            [concat $common {rx/fir_decimate.sv rx/rx_top.sv}] \
     tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}]]
 
 if {![dict exists $tops $top]} {
@@ -49,8 +49,10 @@ set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE $device
 set_global_assignment -name TOP_LEVEL_ENTITY $top
 
-# cordic_core.sv includes cordic_atan_table.svh by bare name.
+# cordic_core.sv includes cordic_atan_table.svh, and fir_decimate.sv includes
+# fir_coef_table.svh, both by bare name.
 set_global_assignment -name SEARCH_PATH [file join $root cordic]
+set_global_assignment -name SEARCH_PATH [file join $root rx]
 
 foreach f [dict get $tops $top] {
     set_global_assignment -name SYSTEMVERILOG_FILE [file join $root $f]
