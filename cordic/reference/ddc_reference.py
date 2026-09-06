@@ -555,6 +555,29 @@ def _validate_no_aliasing(cfg: "DDCConfig") -> None:
         )
 
 
+def _validate_lo_below_nyquist(cfg: "DDCConfig") -> None:
+    """Validate that the LO sits below the input Nyquist frequency.
+
+    An LO above fs_in/2 is not synthesizable as a distinct frequency: the
+    phase accumulator wraps and produces its alias instead, so the mixer
+    quietly down-converts the wrong band. Deliberate bandpass sampling
+    still has an LO inside the first Nyquist zone -- it is the *signal*
+    that folds, not the LO -- so this rejects a genuine configuration
+    error rather than a valid technique.
+
+    Args:
+        cfg: The config being validated.
+
+    Raises:
+        ValueError: If f_lo is at or above fs_in / 2.
+    """
+    if abs(cfg.f_lo) >= cfg.fs_in / 2:
+        raise ValueError(
+            f"f_lo {cfg.f_lo:g} Hz is at or above Nyquist {cfg.fs_in / 2:g} Hz -- "
+            f"the phase accumulator would wrap and mix with the alias instead"
+        )
+
+
 def _validate_cordic_iterations(cfg: "DDCConfig") -> None:
     """Validate n_iter is neither wasted past ang_bits nor short of convergence.
 
@@ -583,14 +606,28 @@ def _validate_cordic_iterations(cfg: "DDCConfig") -> None:
 class DDCConfig:
     """Every value the RTL needs, as a frozen dataclass.
 
-    Defaults target a 2.4 MS/s capture at a 300 kHz carrier, decimated by
-    8 to a 300 kHz passband.
+    Defaults target the DE1-SoC's on-board LTC2308 ADC: a 500 kS/s capture
+    at a 100 kHz carrier, decimated by 8 to a 62.5 kS/s complex baseband
+    with a 25 kHz passband.
+
+    The rate is the converter's, not a choice: 500 kS/s is the LTC2308's
+    ceiling, and nothing else on that board samples faster (the WM8731
+    codec tops out at 96 kHz). fir_cutoff then has to clear the decimated
+    Nyquist of fs_in/(2*decim) = 31.25 kHz, which _validate_no_aliasing()
+    enforces -- the previous 100 kHz cutoff is rejected outright at this
+    rate.
+
+    f_lo is deliberately not a binary fraction of fs_in. At 125 kHz
+    (fs_in/4) the phase accumulator would divide exactly, exercising no
+    phase truncation at all and flattering every spur measurement; 100 kHz
+    leaves a truncation residue, so the reported SFDR is the one the
+    hardware will actually show.
     """
 
-    fs_in: float = 2_400_000.0
-    f_lo: float = 300_000.0
+    fs_in: float = 500_000.0
+    f_lo: float = 100_000.0
     decim: int = 8
-    fir_cutoff: float = 100_000.0
+    fir_cutoff: float = 25_000.0
     n_taps: int = 63
 
     # Widths are trimmed for the TinyTapeout target, where flip-flops are the
@@ -618,6 +655,7 @@ class DDCConfig:
         _validate_modes(self)
         _validate_widths(self)
         _validate_no_aliasing(self)
+        _validate_lo_below_nyquist(self)
         _validate_cordic_iterations(self)
 
     @property
@@ -1125,21 +1163,38 @@ def tone(n: int, fs: float, f: float, amp_dbfs: float, bits: int, phase: float =
     )
 
 
-def two_tone(n: int, cfg: DDCConfig, offsets=(25_000.0, -60_000.0), amp_dbfs=-6.0):
+def two_tone(n: int, cfg: DDCConfig, offsets=(5_000.0, -12_000.0), amp_dbfs=-6.0):
     """Generate an in-band tone plus a second one, both offset from the LO.
 
     Includes one negative-offset tone, so a mirrored spectrum swaps the two
     tones instead of passing silently.
 
+    Both defaults sit inside the FIR's passband, which is what makes an SNR
+    measured on this stimulus meaningful: a tone beyond fir_cutoff is
+    attenuated *by design*, and scoring the output against an ideal model
+    that also filters it measures mostly filtered-out noise. The offsets are
+    therefore tied to fir_cutoff, not fixed -- at the 25 kHz cutoff these
+    defaults leave comfortable margin, while the previous 25/60 kHz pair
+    (chosen for a 100 kHz passband) would now sit outside it and understate
+    SNR by more than 10 dB.
+
     Args:
         n: Number of samples.
         cfg: The DDC configuration, for fs_in, f_lo_actual, and data_bits.
-        offsets: Frequency offsets from the LO, in Hz.
+        offsets: Frequency offsets from the LO, in Hz. Keep |offset| below
+            cfg.fir_cutoff or the tone is filtered rather than measured.
         amp_dbfs: Combined amplitude relative to full scale, in dB.
 
     Returns:
         An (i, q) tuple of integer samples at cfg.data_bits.
     """
+    for off in offsets:
+        if abs(off) >= cfg.fir_cutoff:
+            raise ValueError(
+                f"tone offset {off:g} Hz is at or beyond the FIR cutoff "
+                f"{cfg.fir_cutoff:g} Hz, so it is attenuated by design -- "
+                f"measuring against it reports filter rolloff as datapath error"
+            )
     zi = np.zeros(n, np.int64)
     zq = np.zeros(n, np.int64)
     per = amp_dbfs - 20 * math.log10(len(offsets))

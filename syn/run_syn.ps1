@@ -1,20 +1,22 @@
 # Builds a top with Quartus and prints the two numbers that matter: Fmax and
 # resource usage. Run from anywhere:
 #
-#   powershell -File syn/run_syn.ps1 [-Top rx_top] [-Device 5CEBA4F23C7]
+#   powershell -File syn/run_syn.ps1 [-Top rx_top] [-Device 5CSEMA5F31C6]
 #
 # -Top rx_top           the FPGA RX chain (default)
 # -Top tx_top           the FPGA TX chain
 # -Top tt_um_cordic_ddc the unit that tapes out, where the mixing direction is
 #                       a live pin instead of a constant
+# -Top DE1_SoC          the real board build: pinned out, self-testing, and
+#                       the only one that produces a programmable .sof
 #
 # Quartus is Windows-only here, so this is PowerShell while the simulation
 # scripts are bash under WSL. Both are driven from the same RTL.
 
 param(
-    [ValidateSet("rx_top", "tx_top", "tt_um_cordic_ddc")]
+    [ValidateSet("rx_top", "tx_top", "tt_um_cordic_ddc", "DE1_SoC")]
     [string]$Top = "rx_top",
-    [string]$Device = "5CEBA4F23C7",
+    [string]$Device = "5CSEMA5F31C6",
     [string]$QuartusRoot = "C:\intelFPGA_lite\17.0\quartus"
 )
 

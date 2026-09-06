@@ -13,7 +13,7 @@
 // k < HALF_TAPS-1; FIR_COEF[HALF_TAPS-1] is the centre tap, used once, not
 // doubled, since offset (N_TAPS-1-k) then equals k itself.
 localparam logic signed [`FIR_COEF_BITS-1:0] FIR_COEF [0:`FIR_HALF_TAPS-1] = '{
-    0, 0, 1, 2, 3, 3, 2, 0, -5, -14, -26, -41, -60, -79, -97, -108, -109, -95, -60, 0, 88, 206, 352, 522, 710, 907, 1102, 1283, 1439, 1559, 1634, 1660
+    0, 0, 0, 1, 3, 6, 9, 13, 16, 16, 11, 0, -19, -46, -81, -119, -154, -180, -187, -165, -105, 0, 154, 354, 594, 862, 1140, 1408, 1645, 1831, 1950, 1984
 };
 
 `endif

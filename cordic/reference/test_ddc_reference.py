@@ -35,6 +35,27 @@ from ddc_reference import DDCConfig, DDC, MIX_SEPARATE, MIX_FUSED, TRUNC, ROUND
 # --------------------------------------------------------------------------
 
 
+def _in_band_offset(cfg):
+    """Pick a test-tone offset from the LO that survives the whole RX chain.
+
+    Tests that follow a tone through to the decimated output need it inside
+    the FIR's passband *and* inside the decimated Nyquist, or the tone is
+    either attenuated by the filter or folded by the decimation -- and a
+    folded tone looks exactly like a mirrored spectrum, which is what
+    several of these tests are trying to detect. Half the cutoff clears
+    both limits with margin at any rate, which a hardcoded frequency does
+    not: 40 kHz was comfortably in band at fs_out = 300 kHz and aliases to
+    -22.5 kHz at fs_out = 62.5 kHz.
+
+    Args:
+        cfg: The DDC configuration.
+
+    Returns:
+        A tone offset in Hz, inside the passband.
+    """
+    return cfg.fir_cutoff / 2.0
+
+
 def _peak_bin_hz(y, fs):
     """Find the frequency of the largest FFT bin, signed.
 
@@ -237,7 +258,7 @@ def test_sign_convention_is_not_mirrored():
     cfg = DDCConfig()
     ddc = DDC(cfg)
     n = 8192
-    delta = 40_000.0
+    delta = _in_band_offset(cfg)
 
     for sign in (+1.0, -1.0):
         want = sign * delta
@@ -266,7 +287,7 @@ def test_mirrored_mixer_is_detected():
     cfg = DDCConfig(mix_arch=MIX_SEPARATE)
     ddc = DDC(cfg)
     n = 8192
-    delta = 40_000.0
+    delta = _in_band_offset(cfg)
     xi, xq = G.tone(n, cfg.fs_in, cfg.f_lo_actual + delta, -6.0, cfg.data_bits)
 
     ph = ddc.phase(n)
@@ -403,7 +424,7 @@ def test_wrong_rotation_direction_in_fused_is_caught():
     cfg = DDCConfig(mix_arch=MIX_FUSED)
     ddc = DDC(cfg)
     n = 8192
-    delta = 40_000.0
+    delta = _in_band_offset(cfg)
     xi, xq = G.tone(n, cfg.fs_in, cfg.f_lo_actual + delta, -6.0, cfg.data_bits)
 
     ph = ddc.phase(n)
@@ -544,7 +565,8 @@ def test_separate_mixer_refuses_to_upconvert():
     an error, so this pins the error.
     """
     ddc = DDC(DDCConfig(mix_arch=MIX_SEPARATE))
-    xi, xq = G.tone(256, 2_400_000.0, 40_000.0, -6.0, 16)
+    cfg = ddc.cfg
+    xi, xq = G.tone(256, cfg.fs_in, _in_band_offset(cfg), -6.0, cfg.data_bits)
     try:
         ddc.mix_stage(xi, xq, downconvert=False)
     except ValueError as e:
@@ -655,7 +677,7 @@ def test_interpolate_then_decimate_round_trip():
     cfg = DDCConfig(mix_arch=MIX_FUSED)
     ddc = DDC(cfg)
     n = 2048
-    xi, xq = G.tone(n, cfg.fs_out, 40_000.0, -6.0, cfg.data_bits)
+    xi, xq = G.tone(n, cfg.fs_out, _in_band_offset(cfg), -6.0, cfg.data_bits)
 
     ii, iq, n_sat_i = G.fir_interpolate(
         xi, xq, ddc.coef_interp, cfg.decim, cfg.coef_bits, cfg.acc_bits,
@@ -691,7 +713,7 @@ def test_tx_then_rx_round_trip():
     cfg = DDCConfig(mix_arch=MIX_FUSED)
     ddc = DDC(cfg)
     n = 4096
-    xi, xq = G.tone(n, cfg.fs_out, 40_000.0, -6.0, cfg.data_bits)
+    xi, xq = G.tone(n, cfg.fs_out, _in_band_offset(cfg), -6.0, cfg.data_bits)
 
     tx = ddc.tx_stage(xi, xq)
     assert tx["n_saturated"] == 0, f"unexpected clipping in the TX chain: {tx['n_saturated']}"
@@ -720,7 +742,8 @@ def test_tx_stage_refuses_the_separate_mixer():
     being tested at the mix_stage() layer directly.
     """
     ddc = DDC(DDCConfig(mix_arch=MIX_SEPARATE))
-    xi, xq = G.tone(256, 300_000.0, 40_000.0, -6.0, 16)
+    cfg = ddc.cfg
+    xi, xq = G.tone(256, cfg.fs_out, _in_band_offset(cfg), -6.0, cfg.data_bits)
     try:
         ddc.tx_stage(xi, xq)
     except ValueError as e:
@@ -793,9 +816,17 @@ def test_fir_rejects_out_of_band():
     n = 8192
     skip = 0  # fir_decimate is valid-only: no fill transient to trim
 
-    in_band = G.tone(n, cfg.fs_in, cfg.f_lo_actual + 20_000.0, -6.0, cfg.data_bits)
-    # Past the cutoff and past the decimated Nyquist, so it would fold back.
-    out_band = G.tone(n, cfg.fs_in, cfg.f_lo_actual + 200_000.0, -6.0, cfg.data_bits)
+    in_band = G.tone(n, cfg.fs_in, cfg.f_lo_actual + _in_band_offset(cfg),
+                     -6.0, cfg.data_bits)
+    # Past the cutoff and past the decimated Nyquist, so it would fold back --
+    # but still under fs_in/2, or the stimulus itself aliases at the sampling
+    # step and this measures the wrong rejection.
+    out_offset = 4.0 * cfg.fir_cutoff
+    assert cfg.f_lo_actual + out_offset < cfg.fs_in / 2, (
+        "the out-of-band stimulus must stay under Nyquist to test filter "
+        "rejection rather than sampling alias"
+    )
+    out_band = G.tone(n, cfg.fs_in, cfg.f_lo_actual + out_offset, -6.0, cfg.data_bits)
 
     a = ddc.run(*in_band)
     b = ddc.run(*out_band)
@@ -826,8 +857,13 @@ def test_decimation_takes_the_right_phase():
 
 
 def test_aliasing_cutoff_is_rejected():
+    # A cutoff above the *decimated* Nyquist, derived from the defaults rather
+    # than hardcoded, so this keeps testing the validator and not a rate the
+    # project has since moved off.
+    cfg = DDCConfig()
+    bad = cfg.fs_in / cfg.decim / 2.0 * 1.5
     try:
-        DDCConfig(fir_cutoff=200_000.0, decim=8, fs_in=2_400_000.0)
+        DDCConfig(fir_cutoff=bad, decim=cfg.decim, fs_in=cfg.fs_in)
         raised = False
     except ValueError as e:
         raised = "alias" in str(e)
@@ -841,15 +877,35 @@ def test_aliasing_cutoff_is_rejected():
 
 
 def test_fixed_point_tracks_the_ideal_model():
-    m = G.report(DDCConfig(), n=8192)
-    assert m["ddc_snr_db"] > 70, f"DDC SNR {m['ddc_snr_db']:.1f} dB"
+    """Whole-chain quality at the default config.
+
+    The NCO threshold is deliberately not the ~90 dB an LO like fs/4 or fs/8
+    scores. Those divide the phase accumulator exactly (phase_trunc_residue
+    == 0), exercising no phase truncation at all, and the default LO no
+    longer does: at 100 kHz on a 500 kS/s clock the residue is non-zero, so
+    truncation spurs set the floor and the honest number is ~74 dB. That is
+    the same hardware measured at a representative LO, not a regression --
+    see test_phase_truncation_only_bites_when_the_fcw_exercises_it, which
+    pins both cases against each other.
+    """
+    cfg = DDCConfig()
+    m = G.report(cfg, n=8192)
+    assert m["ddc_snr_db"] > 65, f"DDC SNR {m['ddc_snr_db']:.1f} dB"
     assert m["ddc_sfdr_db"] > 50, f"DDC SFDR {m['ddc_sfdr_db']:.1f} dB"
-    assert m["nco_snr_db"] > 85, f"NCO SNR {m['nco_snr_db']:.1f} dB"
+    assert m["nco_snr_db"] > 70, f"NCO SNR {m['nco_snr_db']:.1f} dB"
+    # The mechanism, not just a number: with a truncating LO the NCO's spurs
+    # should sit at the 6.02*N bound, so a measurement far above it would
+    # mean the LO stopped being representative.
+    assert m["nco_sfdr_db"] < cfg.phase_trunc_sfdr_bound_db + 6.0, (
+        f"NCO SFDR {m['nco_sfdr_db']:.1f} dB is well above the {cfg.phase_trunc_sfdr_bound_db:.1f} dBc "
+        f"phase-truncation bound -- the default LO has become a binary fraction "
+        f"of fs and no longer exercises truncation, which flatters every spur number"
+    )
     assert m["n_saturated"] == 0, f"{m['n_saturated']} samples saturated at -6 dBFS"
-    assert m["ddc_enob"] > 11, f"ENOB {m['ddc_enob']:.2f}"
+    assert m["ddc_enob"] > 10, f"ENOB {m['ddc_enob']:.2f}"
     print(
         f"quality: SNR {m['ddc_snr_db']:.1f} dB, SFDR {m['ddc_sfdr_db']:.1f} dB, "
-        f"ENOB {m['ddc_enob']:.2f} OK"
+        f"ENOB {m['ddc_enob']:.2f}, NCO {m['nco_snr_db']:.1f} dB at a truncating LO OK"
     )
 
 
@@ -867,22 +923,57 @@ def test_narrower_datapath_is_measurably_worse():
 
 
 def test_lo_quantization_is_reported_honestly():
-    """A frequency the accumulator cannot hit must be reported, not rounded away."""
-    # A 12-bit accumulator, with the angle path and CORDIC narrowed to match.
+    """A frequency the accumulator cannot hit must be reported, not rounded away.
+
+    The target LO is built half an accumulator step away from a
+    representable value, which is the worst case for a given phase_bits,
+    rather than being a fixed frequency: a hardcoded target's error depends
+    on how it happens to land relative to fs_in, so at one sample rate it
+    proves the point and at another it is representable by luck.
+    """
+    coarse_bits = 12
+    base = DDCConfig()
+    step = base.fs_in / (1 << coarse_bits)
+    # Half a step above a representable multiple, and comfortably in band.
+    k = int((base.fs_in / 5.0) / step)
+    target = (k + 0.5) * step
+
     cfg = DDCConfig(
-        phase_bits=12, phase_trunc_bits=12, ang_bits=12, n_iter=9, f_lo=300_123.0
+        phase_bits=coarse_bits, phase_trunc_bits=coarse_bits, ang_bits=12,
+        n_iter=9, f_lo=target,
     )
-    assert cfg.f_lo_actual != cfg.f_lo
-    assert abs(cfg.f_lo_actual - cfg.f_lo) > 100, (
-        "a 12-bit accumulator cannot place this LO to within 100 Hz; the model "
-        "should be showing that error, not hiding it"
+    err = cfg.f_lo_actual - cfg.f_lo
+    assert abs(err) > step / 4.0, (
+        f"a {coarse_bits}-bit accumulator (step {step:.1f} Hz) placed this LO to "
+        f"within {abs(err):.1f} Hz; the model should be showing that error, not "
+        f"hiding it"
     )
-    fine = DDCConfig(phase_bits=32, f_lo=300_123.0)
-    assert abs(fine.f_lo_actual - fine.f_lo) < 1e-3
+
+    fine = DDCConfig(phase_bits=32, f_lo=target)
+    fine_step = base.fs_in / (1 << 32)
+    assert abs(fine.f_lo_actual - fine.f_lo) <= fine_step, (
+        "a 32-bit accumulator should place the same LO to within one of its own steps"
+    )
     print(
-        f"LO quantization: 12-bit err {cfg.f_lo_actual - cfg.f_lo:+.1f} Hz, "
+        f"LO quantization: {coarse_bits}-bit err {err:+.1f} Hz (step {step:.1f}), "
         f"32-bit err {fine.f_lo_actual - fine.f_lo:+.2e} Hz OK"
     )
+
+
+def test_lo_above_nyquist_is_rejected():
+    """An LO past fs_in/2 is a configuration error, not a usable setting.
+
+    The accumulator wraps and the mixer silently uses the alias, which is
+    indistinguishable downstream from having asked for the alias on purpose.
+    """
+    base = DDCConfig()
+    try:
+        DDCConfig(f_lo=base.fs_in / 2.0 + 1.0)
+    except ValueError as e:
+        assert "Nyquist" in str(e), e
+        print("LO above Nyquist rejected OK")
+        return
+    raise AssertionError("an LO above Nyquist was silently accepted")
 
 
 # --------------------------------------------------------------------------
@@ -898,11 +989,14 @@ def test_m_and_n_are_independent_knobs():
     # reason about in the first place.
     assert c.phase_bits > c.phase_trunc_bits
 
-    # M controls how exactly an LO can be placed...
+    # M controls how exactly an LO can be placed. The target is derived from
+    # fs_in rather than fixed, so it stays in band at any sample rate and its
+    # awkwardness does not depend on how it happens to divide fs_in.
+    target = c.fs_in / 5.0 + c.fs_in / (1 << 17)
     coarse = DDCConfig(phase_bits=16, phase_trunc_bits=14, ang_bits=14, n_iter=13,
-                       f_lo=300_123.0)
-    fine = DDCConfig(phase_bits=32, f_lo=300_123.0)
-    assert abs(coarse.f_lo_actual - 300_123.0) > abs(fine.f_lo_actual - 300_123.0)
+                       f_lo=target)
+    fine = DDCConfig(phase_bits=32, f_lo=target)
+    assert abs(coarse.f_lo_actual - target) > abs(fine.f_lo_actual - target)
 
     # ...while N controls the spur bound, independently of M.
     assert DDCConfig(phase_trunc_bits=10).phase_trunc_sfdr_bound_db < (
@@ -924,21 +1018,27 @@ def test_m_and_n_are_independent_knobs():
 def test_phase_truncation_only_bites_when_the_fcw_exercises_it():
     """Confirms phase truncation only costs SFDR when the FCW has nonzero low bits.
 
-    The default LO discards only zero bits, so truncation costs nothing
-    there. An LO with nonzero low bits pays the ~6.02*N spur penalty.
+    An LO that is a binary fraction of fs discards only zero bits, so
+    truncation costs it nothing; any other LO pays the ~6.02*N spur penalty.
+    Both cases are constructed here rather than one of them being inherited
+    from the default config: the default LO used to be the benign case and is
+    now deliberately the truncating one (see DDCConfig's docstring), and a
+    test that silently depends on which it is stops testing the mechanism the
+    moment that choice changes.
     """
     cfg = DDCConfig()
     ddc = DDC(cfg)
     n = 8192
-    assert cfg.phase_trunc_residue == 0, (
-        "the default LO is expected to be a binary fraction of fs; if this "
-        "changed, the trap this test documents no longer applies here"
-    )
+    mask = (1 << (cfg.phase_bits - cfg.phase_trunc_bits)) - 1
 
     fs_ = G.full_scale(cfg.data_bits)
-    benign = ddc.nco(ddc.phase(n))
-    hard_inc = (cfg.phase_inc + 0x0002AAAB) & ((1 << cfg.phase_bits) - 1)
-    assert hard_inc & ((1 << (cfg.phase_bits - cfg.phase_trunc_bits)) - 1) != 0
+    # Benign: an FCW that is exactly representable in the truncated phase.
+    benign_inc = cfg.phase_inc & ~mask
+    assert benign_inc & mask == 0
+    benign = ddc.nco(ddc.phase(n, inc=benign_inc))
+    # Truncating: the same FCW with nonzero bits below the truncation point.
+    hard_inc = (benign_inc + 0x0002AAAB) & ((1 << cfg.phase_bits) - 1)
+    assert hard_inc & mask != 0
     hard = ddc.nco(ddc.phase(n, inc=hard_inc))
 
     s_benign = G.sfdr_db((benign[0] + 1j * benign[1]) / fs_)
@@ -1138,26 +1238,41 @@ def test_clipping_inside_the_rotation_is_counted():
 
 
 def test_quantization_that_breaks_linear_phase_is_rejected():
-    """firwin_lowpass builds exact symmetry; the residue fixup can destroy it."""
+    """firwin_lowpass builds exact symmetry; the residue fixup can destroy it.
+
+    The breaking width is searched for rather than hardcoded. Which
+    coef_bits first moves the rounding residue off the centre tap depends on
+    the filter's shape, so it moves whenever fir_cutoff does -- at the old
+    100 kHz/1.2 MHz cutoff 10 bits broke symmetry; at the current 25 kHz it
+    takes 8. A fixed number silently stops testing anything the moment the
+    filter is retuned.
+    """
     cfg = DDCConfig()
     h = G.firwin_lowpass(cfg.n_taps, cfg.fir_cutoff / (cfg.fs_in / 2))
 
-    # Wide enough that the residue lands on the centre tap: symmetry survives.
-    q = G.fir_taps_quantized(h, 16, 1.0 / cfg.k_gain)
-    assert np.array_equal(q, q[::-1]), "16-bit taps should still be symmetric"
-
-    # Narrow enough that the argmax moves off centre and symmetry breaks. If
-    # this stops raising, the guard has gone vacuous.
-    try:
-        G.fir_taps_quantized(h, 10, 1.0 / cfg.k_gain)
-        raised = False
-    except ValueError as e:
-        raised = "linear phase" in str(e)
-    assert raised, (
-        "quantizing to 10 bits breaks tap symmetry and must be rejected, not "
-        "silently returned as a filter that is no longer linear phase"
+    # The configured width must keep symmetry, or the RTL's folded FIR is
+    # computing a different filter than the one that was designed.
+    q = G.fir_taps_quantized(h, cfg.coef_bits, 1.0 / cfg.k_gain)
+    assert np.array_equal(q, q[::-1]), (
+        f"{cfg.coef_bits}-bit taps are not symmetric -- fir_decimate.sv folds "
+        f"on the assumption that they are"
     )
-    print("linear-phase-breaking quantization rejected OK")
+
+    # Somewhere below it, the argmax moves off centre and symmetry breaks.
+    # If no width does, the guard has gone vacuous and this test says so.
+    broke_at = None
+    for bits in range(cfg.coef_bits - 1, 3, -1):
+        try:
+            G.fir_taps_quantized(h, bits, 1.0 / cfg.k_gain)
+        except ValueError as e:
+            if "linear phase" in str(e):
+                broke_at = bits
+                break
+    assert broke_at is not None, (
+        f"no coefficient width below {cfg.coef_bits} bits broke tap symmetry, so "
+        f"the linear-phase guard is never exercised and may be vacuous"
+    )
+    print(f"linear-phase-breaking quantization rejected at {broke_at} bits OK")
 
 
 def test_snr_is_measured_at_data_scale_not_out_bits():
@@ -1171,7 +1286,8 @@ def test_snr_is_measured_at_data_scale_not_out_bits():
     # A wider output word changes nothing about the samples themselves...
     narrow = DDC(DDCConfig(data_bits=14, out_bits=14))
     wide = DDC(DDCConfig(data_bits=14, out_bits=16))
-    xi, xq = G.tone(2048, narrow.cfg.fs_in, narrow.cfg.f_lo_actual + 37_000.0,
+    xi, xq = G.tone(2048, narrow.cfg.fs_in,
+                    narrow.cfg.f_lo_actual + _in_band_offset(narrow.cfg),
                     -6.0, narrow.cfg.data_bits)
     rn, rw = narrow.run(xi, xq), wide.run(xi, xq)
     assert np.array_equal(rn["out_i"], rw["out_i"]), (
@@ -1188,16 +1304,33 @@ def test_snr_is_measured_at_data_scale_not_out_bits():
         f"the signal's actual scale"
     )
 
-    # And narrowing data_bits, which is a real loss, still costs ~6 dB a bit.
-    snr = [G.report(DDCConfig(data_bits=w, out_bits=w), n=4096)["ddc_snr_db"]
-           for w in (16, 14, 12)]
-    assert snr[0] > snr[1] > snr[2], f"SNR should fall with data_bits: {snr}"
-    for hi, lo in zip(snr, snr[1:]):
+    # And narrowing data_bits, which is a real loss, costs ~6 dB a bit -- but
+    # only in the regime where data_bits is the *worst* quantizer present.
+    # Two other 16-bit-class noise sources sit alongside it: the default LO's
+    # phase truncation (a ~74 dB floor) and coef_bits=16. Measured at 16-bit
+    # data all three contribute comparably and the 16->14 step collapses to
+    # ~7 dB, which is not a metric failure but the point at which the other
+    # two take over. A non-truncating LO removes one of them; the slope is
+    # then asserted over 14/12/10, where data_bits is unambiguously dominant,
+    # and 16 is kept only in the monotonicity check.
+    benign_lo = DDCConfig().fs_in / 8.0
+    assert DDCConfig(f_lo=benign_lo).phase_trunc_residue == 0, (
+        "the LO chosen to isolate data_bits still exercises phase truncation, "
+        "which would put a second noise source back into the measurement"
+    )
+    widths = (16, 14, 12, 10)
+    snr = [G.report(DDCConfig(data_bits=w, out_bits=w, f_lo=benign_lo), n=4096)["ddc_snr_db"]
+           for w in widths]
+    assert all(a > b for a, b in zip(snr, snr[1:])), (
+        f"SNR should fall monotonically with data_bits: {dict(zip(widths, snr))}"
+    )
+    for (wh, hi), (wl, lo) in zip(list(zip(widths, snr))[1:], list(zip(widths, snr))[2:]):
         assert 8.0 < hi - lo < 16.0, (
-            f"two bits should cost roughly 12 dB, got {hi - lo:.1f} dB"
+            f"two bits should cost roughly 12 dB between {wh} and {wl}, got {hi - lo:.1f} dB"
         )
-    print(f"SNR normalised at data scale; {snr[0]:.1f}/{snr[1]:.1f}/{snr[2]:.1f} dB "
-          f"across 16/14/12 bits OK")
+    print("SNR normalised at data scale; "
+          + "/".join(f"{s:.1f}" for s in snr)
+          + f" dB across {'/'.join(str(w) for w in widths)} bits OK")
 
 
 def test_default_architecture_is_the_one_the_rtl_implements():
@@ -1261,6 +1394,7 @@ def main():
     test_fixed_point_tracks_the_ideal_model()
     test_narrower_datapath_is_measurably_worse()
     test_lo_quantization_is_reported_honestly()
+    test_lo_above_nyquist_is_rejected()
     test_m_and_n_are_independent_knobs()
     test_phase_truncation_only_bites_when_the_fcw_exercises_it()
     test_widening_n_improves_spectral_purity()

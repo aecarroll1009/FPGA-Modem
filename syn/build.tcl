@@ -16,10 +16,11 @@
 load_package flow
 
 set top    [expr {[llength $argv] > 0 ? [lindex $argv 0] : "rx_top"}]
-# Cyclone V E, speed grade 7 -- the DE0-CV part. Chosen as a deliberately
-# unexciting default: if the design closes here it closes on the faster grades
-# too. Override by passing a part name as the second argument.
-set device [expr {[llength $argv] > 1 ? [lindex $argv 1] : "5CEBA4F23C7"}]
+# Cyclone V SE A5, speed grade 6 -- the DE1-SoC part. Note the board's own
+# documentation gives the ordering code 5CSEMA5F31C6N; Quartus rejects the
+# trailing N ("Part name is invalid"), so the device name drops it.
+# Override by passing a part name as the second argument.
+set device [expr {[llength $argv] > 1 ? [lindex $argv 1] : "5CSEMA5F31C6"}]
 
 set here    [file dirname [file normalize [info script]]]
 set root    [file dirname $here]
@@ -35,7 +36,13 @@ set common {
 set tops [dict create \
     rx_top            [concat $common {rx/fir_decimate.sv rx/rx_top.sv}] \
     tx_top            [concat $common {rx/fir_interpolate.sv tx/tx_top.sv}] \
-    tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}]]
+    tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}] \
+    DE1_SoC           [concat $common {rx/fir_decimate.sv rx/rx_top.sv
+                                       de1soc/hex7seg.sv de1soc/DE1_SoC.sv}]]
+
+# Only DE1_SoC is a real board build with pinned-out I/O; the others are
+# core-datapath builds whose I/O is false-pathed for measurement.
+set pinned {DE1_SoC}
 
 if {![dict exists $tops $top]} {
     puts "unknown top '$top' -- expected one of: [dict keys $tops]"
@@ -51,16 +58,28 @@ set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE $device
 set_global_assignment -name TOP_LEVEL_ENTITY $top
 
-# cordic_core.sv includes cordic_atan_table.svh, and fir_decimate.sv includes
-# fir_coef_table.svh, both by bare name.
+# cordic_core.sv includes cordic_atan_table.svh, fir_decimate.sv includes
+# fir_coef_table.svh, and DE1_SoC.sv includes selftest_rom.svh, all by bare
+# name.
 set_global_assignment -name SEARCH_PATH [file join $root cordic]
 set_global_assignment -name SEARCH_PATH [file join $root rx]
+set_global_assignment -name SEARCH_PATH [file join $root de1soc]
 
 foreach f [dict get $tops $top] {
     set_global_assignment -name SYSTEMVERILOG_FILE [file join $root $f]
 }
 
 set_global_assignment -name SDC_FILE [file join $here $top.sdc]
+
+if {[lsearch -exact $pinned $top] >= 0} {
+    # Real board build: constrain the pins this design uses, and make sure
+    # every pin it does not use is left alone. Quartus's default for unused
+    # pins drives them, and on the DE1-SoC those nets go to SDRAM, the HPS
+    # and the audio codec -- driving them would put the FPGA in contention
+    # with real devices.
+    source [file join $here de1soc_pins.tcl]
+    set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+}
 
 # Report a violation rather than silently inferring a latch or a soft
 # multiplier where the design did not ask for one.

@@ -24,6 +24,12 @@ handed off to GNU Radio for the actual demod/mod work.
 
 ![RX/TX CORDIC datapath](docs/ddc_duc_datapath.svg)
 
+**Status.** The full RX and TX datapaths exist in RTL and are verified bit-exact against a
+numpy reference model, along with a pinned-out, self-testing DE1-SoC board top. Nothing has
+run on hardware — there is no board on hand — and the LTC2308 controller, the analog front
+end and a TX output device are all still missing. *Board bring-up* below says which of
+those gaps blocks what.
+
 ## Components
 
 - **CORDIC (rotation mode)** — the shared engine behind both directions: fused NCO +
@@ -31,8 +37,11 @@ handed off to GNU Radio for the actual demod/mod work.
   Both directions run the same 16 iterations through the same adders, so they cost the
   same and neither is a slow path.
 - **Decimating FIR** (`rx/fir_decimate.sv`) — the RX-side filter: one 63-tap linear-phase
-  lowpass decimating by 8, with the CORDIC gain K ≈ 1.6467 folded into its coefficients
-  rather than spent on a separate scaling stage. Deliberately not a CIC — a CIC earns its
+  lowpass decimating by 8 (25 kHz cutoff against a 31.25 kHz decimated Nyquist, 68.7 dB
+  stopband), with the CORDIC gain K ≈ 1.6467 folded into its coefficients
+  rather than spent on a separate scaling stage. It is what prevents aliasing *at the
+  decimation step*; aliasing at the converter is a separate problem an analog filter has to
+  solve, since by then the damage is already in the samples. Deliberately not a CIC — a CIC earns its
   keep at decimation factors in the tens or hundreds, where its multiplier-free structure
   beats a long FIR. At ÷8 it would save little and cost passband droop that needs a
   compensating FIR afterward anyway. Exploits the filter's own linear-phase symmetry
@@ -51,6 +60,12 @@ handed off to GNU Radio for the actual demod/mod work.
 
 ## Rate budget
 
+The sample rate is set by the converter, not by the logic. The DE1-SoC's on-board ADC is
+an **LTC2308**, and on this board it tops out at **500 kS/s** — so that is the number the
+whole chain is budgeted against, and every rate below is derived from it rather than
+chosen. (The design was originally written for 2.4 MS/s, which no converter on this board
+can reach; see *Board bring-up* for why that mattered and what it changed.)
+
 The CORDIC is iterative — one rotation per clock, `n_iter = 16` — so the mixer is not a
 one-sample-per-clock block. Measured sustained throughput of `ddc_frontend` with
 `in_valid` held high is **19.0 clocks per sample**: 16 iterations plus the
@@ -60,21 +75,25 @@ mixer handshake changes, since both move every budget below:
 
 | | rate | cycle budget |
 |---|---|---|
-| Input samples | 2.4 MS/s | 19 clocks each → **45.6 MHz minimum clock** |
-| Mixer outputs | 2.4 MS/s | one per 19 clocks |
-| FIR outputs (÷8) | 300 kS/s | 152 clocks per I/Q output pair |
+| Input samples | 500 kS/s (LTC2308 ceiling) | 19 clocks each → **9.5 MHz minimum clock** |
+| Mixer outputs | 500 kS/s | one per 19 clocks |
+| FIR outputs (÷8) | 62.5 kS/s | 152 clocks per I/Q output pair |
 
 Two consequences worth stating up front. First, the FIR's 63 taps fold around their own
 symmetry (`h[k] == h[62-k]`) into 32 multiply-accumulate steps per rail — one pre-add
 replaces one multiply, exact rather than approximate because the folded pair is only
 correct if the taps are precisely palindromic, which `fir_taps_quantized()` enforces at
 generation time. Run with one multiplier per rail (both rails computed in parallel, not
-time-shared — DSP blocks are abundant on this device, 2 of 66), that is 32 cycles against
+time-shared — DSP blocks are abundant on this device, 2 of 87), that is 32 cycles against
 the 152-clock budget: **21%**, not the 83% an unfolded, rail-shared design would cost.
-Second, 19 clocks/sample is a ceiling on input rate: 2.4 MS/s needs 45.6 MHz and scales
-linearly, so a 10 MS/s capture would demand 190 MHz. If the input rate ever rises that
-far, the fix is to unroll the CORDIC into 16 pipeline stages for one sample per clock,
-trading ~16× the adders for the rate — not to push the clock.
+
+Second, the 19 clocks/sample that used to be the binding constraint no longer is. At 500
+kS/s the datapath needs 9.5 MHz against a 50 MHz board oscillator — a **5.3× margin** — so
+the iterative CORDIC is no longer trading rate for area in any way that costs anything
+here. The ratio is still worth keeping in view because it scales linearly: the converter,
+not the logic, is what would have to change first, and only if a capture faster than about
+2.6 MS/s were ever needed would unrolling the CORDIC into 16 pipeline stages (~16× the
+adders, one sample per clock) become the answer.
 
 TX is the mirror image, with the multiply work moved to the *other* side of the mixer: for
 every baseband sample accepted, the interpolator must produce 8 outputs, one every 19
@@ -89,21 +108,32 @@ history is a plain 8-deep shift register per rail, not a circular buffer.
 ## Synthesis
 
 `syn/` builds with Quartus so the rate budget above is checked against a real device
-instead of only against simulation. Three tops are buildable, and they answer different
+instead of only against simulation. Four tops are buildable, and they answer different
 questions:
 
 ```
 powershell -File syn/run_syn.ps1                          # rx_top, the FPGA RX chain
 powershell -File syn/run_syn.ps1 -Top tx_top              # tx_top, the FPGA TX chain
 powershell -File syn/run_syn.ps1 -Top tt_um_cordic_ddc    # the unit that tapes out
+powershell -File syn/run_syn.ps1 -Top DE1_SoC             # the pinned-out board build
 ```
+
+The first three are core-datapath builds: their I/O is false-pathed, so what they measure
+is the logic and nothing else. `DE1_SoC` is the only one with real pin assignments and the
+only one that produces a programmable `.sof` — see *Board bring-up* below.
 
 The project is generated by `syn/build.tcl` rather than checked in, so the file list and
 device cannot drift away from the RTL. Everything it writes goes to the gitignored
-`syn/output/`.
+`syn/output/`. The default device is `5CSEMA5F31C6`, the DE1-SoC part — note the board's
+own documentation gives the ordering code `5CSEMA5F31C6N`, and Quartus rejects the
+trailing `N` outright ("Part name is invalid").
 
 Measured on a Cyclone V 5CEBA4F23C7 (speed grade 7 — the slow common grade, so the faster
-parts only do better), Quartus Lite 17.0, constrained at 50 MHz:
+parts only do better), Quartus Lite 17.0, constrained at 50 MHz. These predate the move to
+the DE1-SoC part and have not been re-measured on `5CSEMA5F31C6`. Resource counts should
+carry over essentially unchanged (same family, same fabric), and Fmax should *improve*,
+since the DE1-SoC part is speed grade 6 against this one's 7 — but "should" is not
+"measured", so the table stays labelled with the part it was actually taken on:
 
 | | `rx_top` (CORDIC + decimator) | `tx_top` (CORDIC + interpolator) | `tt_um_cordic_ddc` (CORDIC only) |
 |---|---|---|---|
@@ -114,10 +144,10 @@ parts only do better), Quartus Lite 17.0, constrained at 50 MHz:
 | DSP blocks | **2** | **2** | **0** |
 | Block memory | 8,704 bits | 0 bits | 0 bits |
 
-Three things worth reading off that table. The rate budget is not close to binding on any
-build — even `rx_top`'s 69.55 MHz, the tightest of the three, is still 1.53× the 45.6 MHz
-the CORDIC needs, so the iterative CORDIC remains the right call and the unrolled version
-stays unnecessary. The CORDIC itself still spends **no** DSP blocks, because shift-and-add
+Three things worth reading off that table. The rate budget is nowhere near binding on any
+build — even `rx_top`'s 69.55 MHz, the tightest of the three, is 7.3× the 9.5 MHz the
+converter can actually demand, so the iterative CORDIC remains the right call and the
+unrolled version stays unnecessary. The CORDIC itself still spends **no** DSP blocks, because shift-and-add
 is the whole point of it — `tt_um_cordic_ddc`, which is CORDIC-only, proves that in
 isolation; the 2 DSP blocks in each of the other two builds are entirely the filter's, one
 multiplier per rail (see the rate budget above for why 2, not 1, in both directions).
@@ -151,9 +181,73 @@ ALMs are LUT-based and do not predict standard-cell area, and the CORDIC's barre
 are precisely where the two diverge — cheap in LUTs, expensive in cells. A real tile
 estimate needs an ASIC flow.
 
-The top level's egress is a stub — a valid/ready IQ stream with the I/O false-pathed in
-`syn/rx_top.sdc` — so these are core-datapath numbers. Real I/O constraints arrive with
-the physical link.
+`rx_top`/`tx_top`'s egress is a stub — a valid/ready IQ stream with the I/O false-pathed in
+`syn/rx_top.sdc` — so the table above is core-datapath numbers by construction. The
+`DE1_SoC` build is where real pins and real I/O standards enter.
+
+## Board bring-up
+
+`de1soc/` is the DE1-SoC build: the RX chain pinned out, running on the board's own 50 MHz
+oscillator, checking itself against the reference model.
+
+**It contains no ADC on purpose.** The datapath, the analog front end and the converter
+interface are three independent ways for a board to give a wrong answer, and wiring them up
+together means a bad result has three suspects. So the first bring-up stage plays a
+512-sample stimulus ROM through `rx_top` and compares all 57 decimated outputs against the
+expectations the *same* reference model produced for the simulation testbenches. A
+programmed board therefore answers exactly one question — does the synthesized datapath
+produce, on real silicon, the bits the model says it should — and when the LTC2308
+controller lands, the datapath is already ruled out.
+
+The result is readable off the board with no instrumentation: `LEDR[1]` alone lit is a
+pass, `LEDR[2]` is a mismatch, `LEDR[3]` is an overflow that should never happen, `LEDR[9]`
+is a heartbeat so a dead clock is distinguishable from a design that produced nothing, and
+`HEX3:HEX0` show the outputs-received and mismatch counts in hex. `de1soc/gen_selftest_rom.py`
+regenerates the ROM; it must be re-run after any config change, since the expectations are
+config-specific.
+
+`de1soc/run_sim_de1soc.sh` verifies the wrapper before it is ever programmed, and it runs
+the negative case too: a second instance built at a deliberately wrong `PHASE_INC`, so
+every output legitimately mismatches and a comparison that silently compared nothing would
+be caught. Overriding the parameter rather than forcing the ROM's contents matters — it
+corrupts the design's *input* instead of reaching inside it, so what is under test stays
+the real comparison path. Both pass: 57/57 outputs, 0 mismatches positive, 57 mismatches
+negative.
+
+The pin assignments in `syn/de1soc_pins.tcl` (71 locations plus their I/O standards) are
+lifted from a hardware-proven Quartus project for this exact board rather than transcribed
+from the manual. `build.tcl` also sets `RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"` for
+this top specifically: Quartus's default is to *drive* unused pins, and on the DE1-SoC
+those nets run to SDRAM, the HPS and the audio codec, so the default would put the FPGA in
+contention with real devices.
+
+**Not yet run on hardware.** There is no board on hand. Everything above is verified in
+simulation only — the `DE1_SoC` top has not yet been taken through Quartus or timing-closed,
+let alone programmed — and nothing here is claimed as a hardware result.
+
+### What the board cannot do yet
+
+Three gaps, stated plainly because they bound what this project currently is:
+
+- **No LTC2308 controller.** The ADC pins are declared and parked at constants so the pin
+  assignments and I/O standards are in place, but there is no SPI master driving them. This
+  is the next piece of RTL. `syn/DE1_SoC.sdc` false-paths those pins today and says in-line
+  that the false paths must be replaced with real `set_input_delay`/`set_output_delay`
+  against the converter's timing when the controller lands — leaving them false-pathed then
+  would be constraining a live synchronous interface as if it did not exist.
+- **No DAC, so TX cannot leave the board.** The DE1-SoC has no general-purpose DAC. The TX
+  chain is complete and verified in RTL, but transmitting needs either the audio codec
+  (band-limited to audio) or an external part on the GPIO header.
+- **No analog front end.** The LTC2308 is unipolar, 0–4.096 V, so a real signal needs
+  biasing to mid-scale and an anti-alias filter ahead of it. That anti-alias filter is
+  **analog and unavoidable** — the decimating FIR prevents aliasing at the *decimation*
+  step, which happens after sampling, and can do nothing about energy that already folded
+  into band at the converter.
+
+When the converter does land, its 12 bits are left-justified into the 16-bit datapath
+rather than zero-extended: the model's own width sweep puts 16-bit at 71.3 dB SNR against
+10-bit at 43.9 dB, and right-justifying a 12-bit sample would throw away the top of that
+range for nothing.
 
 ## TinyTapeout
 
@@ -196,7 +290,7 @@ costs 32 flip-flops — deliberately not spent, since area is what binds here.
 
 ## Verification
 
-The numpy reference model is `cordic/reference/ddc_reference.py`, with 44 tests in
+The numpy reference model is `cordic/reference/ddc_reference.py`, with 45 tests in
 `cordic/reference/test_ddc_reference.py` (`python cordic/reference/test_ddc_reference.py`).
 
 It is two models in one file. `ddc_ideal()` is float64, exact: what the answer should be.
@@ -210,13 +304,25 @@ every intermediate stage (NCO, mixer, output), plus a generated `ddc_params.svh`
 RTL is parameterised from the same numbers. The testbench reads these values rather than
 recomputing the reference, so a sign error shared by both implementations cannot hide.
 
-Measured at the default 16-bit config (`--report`):
+Measured at the default 16-bit config (`--report`) — 500 kS/s in, 62.5 kS/s out, LO at
+100 kHz:
 
 | | SNR | SFDR | ENOB |
 |---|---|---|---|
-| NCO alone | 91.6 dB | 99.3 dB | — |
+| NCO alone | 73.9 dB | 85.8 dB | — |
 | NCO at an LO that exercises the N-bit truncation | — | 84.3 dB | — |
-| DDC (fused mixer) | 80.4 dB | 83.8 dB | 13.06 |
+| DDC (fused mixer) | 71.5 dB | 58.6 dB | 11.58 |
+
+The default LO is deliberately **not** a binary fraction of the sample rate. 100 kHz on
+500 kS/s is fs/5, so its frequency control word is not a multiple of 2^(M−N) and the M→N
+phase truncation error is a long-period sequence rather than identically zero. fs/4 or fs/8
+would divide the accumulator exactly, exercise no truncation at all, and report flattering
+numbers that no real LO would reproduce. The cost of that choice is visible in the table —
+these figures are lower than the ones this project used to quote at a benign LO, and that
+is the point: 73.9 dB is what the NCO does at an LO you would actually ask for, and
+`test_phase_truncation_only_bites_when_the_fcw_exercises_it` builds *both* FCWs and
+measures the gap (96.4 dB benign vs 84.3 dB truncating, against a ~6.02·N = 84.3 dB bound)
+so the difference is a documented property rather than a surprise.
 
 ### Both mixing directions
 
@@ -226,9 +332,9 @@ should fail:
 
 | check | result |
 |---|---|
-| up-convert vs analytic K·x·e^(+jθ) | 86.1 dB |
+| up-convert vs analytic K·x·e^(+jθ) | 74.3 dB |
 | up-convert vs the *down-convert* reference (must fail) | −3.0 dB |
-| up-convert then down-convert, vs K²·x | 83.5 dB |
+| up-convert then down-convert, vs K²·x | 79.6 dB |
 | `mixer_fused.sv` declares `downconvert` as a port, not a parameter | asserted in source |
 
 On the RTL side `rx/run_sim_ddc.sh` runs the stimulus three times — all down, all up, and
@@ -241,7 +347,7 @@ On silicon, TX only ever covers the mixer — the interpolator is FPGA/host scop
 the decimator — but both the reference model and the FPGA RTL now have a complete TX chain.
 `test_tx_then_rx_round_trip` interpolates and up-converts a baseband tone, treats the
 result as a captured RF signal, then down-converts and decimates it back with the RX chain,
-recovering the original at 77.9 dB SNR. That one test exercises the interpolator, both
+recovering the original at 79.5 dB SNR. That one test exercises the interpolator, both
 mixer directions, and the decimator together, so a wrong sign or a wrong gain anywhere in
 the chain would show up there even if it happened to cancel in a narrower test.
 
@@ -334,7 +440,8 @@ valid-only convolution to match.
 Three separate numbers, and conflating them loses information:
 
 - **M = 24** (`phase_bits`) — accumulator width. Sets frequency resolution, fs/2^M =
-  0.14 Hz at 2.4 MS/s. Any LO is placed essentially exactly.
+  0.030 Hz at 500 kS/s. Any LO is placed essentially exactly: the default 100 kHz lands
+  0.006 Hz off.
 - **N = 14** (`phase_trunc_bits`) — phase bits reaching the angle path. Sets spectral
   purity. Truncating M→N discards information every sample, and the error is periodic, so
   it shows up as discrete spurs: worst-case bound ~6.02·N = 84 dBc. Nothing downstream
@@ -346,8 +453,8 @@ Three separate numbers, and conflating them loses information:
   atan entries round to zero and those iterations stop doing anything.
 
 These are trimmed from an earlier 32/14/18 because the TinyTapeout target makes flip-flops
-the scarce resource. Dropping M 32→24 costs only LO placement precision — 0.56 mHz to
-0.14 Hz, both far finer than any modem needs — and nothing in SNR or SFDR, because spectral
+the scarce resource. Dropping M 32→24 costs only LO placement precision — 0.12 mHz to
+0.030 Hz, both far finer than any modem needs — and nothing in SNR or SFDR, because spectral
 purity is N's job. Narrowing `cordic_bits` 20→18 alongside them *improved* SNR by 1.16 dB:
 fewer guard bits means fewer LSBs discarded by the output shift, and floor-mode truncation
 error is biased rather than symmetric, so less of it accumulates.

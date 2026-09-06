@@ -1,10 +1,11 @@
 # Timing constraints for rx_top.
 #
-# The clock target comes straight from the rate budget in the README: the
-# iterative CORDIC needs 19 clocks per sample, so 2.4 MS/s demands at least
-# 45.6 MHz. 50 MHz is the next round number up and is the stock oscillator on
-# every Cyclone V dev board, so it is the number to close against -- roughly
-# 10% margin over the requirement.
+# 50 MHz is the DE1-SoC's stock oscillator, so it is the number every build
+# closes against. It is no longer a floor: the iterative CORDIC needs 19
+# clocks per sample and the board's LTC2308 tops out at 500 kS/s, so the
+# datapath only *requires* 9.5 MHz. Constraining at 50 MHz anyway keeps this
+# an honest Fmax measurement -- the reported slack is headroom against the
+# real oscillator, not against a rate the converter cannot reach.
 
 create_clock -name clk -period 20.000 [get_ports clk]
 

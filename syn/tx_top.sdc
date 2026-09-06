@@ -2,8 +2,8 @@
 #
 # Same target as rx_top.sdc, for the same reason: the mixer's 19-clocks-per-
 # sample rate is direction-independent (RX and TX run the same CORDIC
-# iterations), so the 45.6 MHz floor and the 50 MHz constraint carry over
-# unchanged. See rx_top.sdc for the derivation.
+# iterations), so the 50 MHz constraint carries over unchanged. See
+# rx_top.sdc for why 50 MHz is a measurement target rather than a floor.
 
 create_clock -name clk -period 20.000 [get_ports clk]
 
