@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Regenerates the self-test ROM and coefficient tables, then runs the
-# DE1-SoC board top level under Verilator -- both the positive case (the
-# board reports pass) and the negative one (a corrupted expectation is
-# detected). Run from the repo root:
+# Regenerates the vectors and coefficient tables, then runs the three board
+# testbenches: ROM self-test, the negative case, and live ADC. From the repo
+# root:
 #
 #   ./de1soc/run_sim_de1soc.sh
 #
-# See cordic/run_sim.sh for the Verilator version and space-in-path notes
-# that apply equally here.
+# See cordic/run_sim.sh for the Verilator version and space-in-path notes.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -21,17 +19,17 @@ mkdir -p "$SIM_DIR"
 
 SRC="cordic/cordic_core.sv cordic/nco.sv cordic/mixer_fused.sv
      rx/ddc_frontend.sv rx/fir_decimate.sv rx/rx_top.sv
-     de1soc/hex7seg.sv de1soc/DE1_SoC.sv de1soc/tb_de1soc.sv"
+     de1soc/hex7seg.sv de1soc/ltc2308_ctrl.sv de1soc/ltc2308_model.sv
+     de1soc/uart_tx.sv de1soc/byte_fifo.sv de1soc/iq_framer.sv
+     de1soc/DE1_SoC.sv de1soc/tb_de1soc.sv"
 
-# UNUSEDSIGNAL: board pins not yet used (SW, spare KEYs, ADC_DOUT) are
-# collected into _unused_ok rather than omitted, so pin assignments stay in
-# place for the ADC work.
-# DECLFILENAME: tb_de1soc.sv holds both the positive and negative testbench,
-# since they instantiate the same DUT the same way.
+# UNUSEDSIGNAL: spare SWs and KEYs are collected into _unused_ok.
+# DECLFILENAME: tb_de1soc.sv holds all three board testbenches.
+# UNUSEDPARAM: adc_vectors.svh is included file-wide, unused in two builds.
 build_and_run () {
     local top="$1"
     verilator --binary --timing -Wall \
-        -Wno-UNUSEDSIGNAL -Wno-DECLFILENAME \
+        -Wno-UNUSEDSIGNAL -Wno-DECLFILENAME -Wno-UNUSEDPARAM \
         --top-module "$top" \
         -Icordic -Irx -Ide1soc \
         $SRC \
@@ -42,3 +40,4 @@ build_and_run () {
 
 build_and_run tb_de1soc
 build_and_run tb_de1soc_negative
+build_and_run tb_de1soc_live

@@ -49,11 +49,20 @@ jobs:
       - name: TinyTapeout wrapper (byte-serial interface)
         run: bash tt/run_sim_tt.sh
 
-      - name: DE1-SoC board top (positive and negative)
-        run: bash de1soc/run_sim_de1soc.sh
-
       - name: LTC2308 SPI master
         run: bash de1soc/run_sim_ltc2308.sh
 
+      - name: UART, byte FIFO, and IQ framer
+        run: bash de1soc/run_sim_uart.sh
+
+      - name: DE1-SoC board top (self-test, negative, and live ADC)
+        run: bash de1soc/run_sim_de1soc.sh
+
+      - name: Host IQ decoder
+        run: python3 host/capture_iq.py --self-check
+
       - name: Sustained throughput measurement
         run: bash rx/run_throughput.sh
+
+      - name: QPSK BER over AWGN
+        run: python3 sim/ber_awgn.py --skip-robustness --ebn0-max 8 --max-bits 200000

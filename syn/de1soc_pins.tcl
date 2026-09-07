@@ -1,8 +1,8 @@
 # DE1-SoC pin assignments for the signals this project uses.
 #
 # Copied from the Terasic DE1_SoC.qsf reference pinout, narrowed to the pins
-# used here: the 50 MHz clock, status I/O, and the LTC2308 ADC port. All
-# FPGA-side pins are 3.3-V LVTTL, per the Cyclone V handbook.
+# used here: the 50 MHz clock, status I/O, the LTC2308 port, and one GPIO for
+# the IQ egress UART. All 3.3-V LVTTL.
 #
 # Only assigned pins are constrained; syn/build.tcl reserves the rest as
 # tri-stated inputs, since unassigned pins on this board land on SDRAM, HPS,
@@ -10,6 +10,8 @@
 #
 # Regenerate/extend by copying further lines from the reference qsf; do not
 # hand-edit pin numbers.
+# GPIO_0[0] on the 40-pin header; see docs/iq_format.md for wiring.
+set_location_assignment PIN_AC18 -to UART_TX
 set_location_assignment PIN_AJ4 -to ADC_CONVST
 set_location_assignment PIN_AK4 -to ADC_DIN
 set_location_assignment PIN_AK3 -to ADC_DOUT
@@ -153,3 +155,4 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SW[6]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SW[7]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SW[8]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to SW[9]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to UART_TX

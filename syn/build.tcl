@@ -34,7 +34,9 @@ set tops [dict create \
     tx_top            [concat $common {rx/fir_interpolate.sv tx/tx_top.sv}] \
     tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}] \
     DE1_SoC           [concat $common {rx/fir_decimate.sv rx/rx_top.sv
-                                       de1soc/hex7seg.sv de1soc/DE1_SoC.sv}]]
+                                       de1soc/hex7seg.sv de1soc/ltc2308_ctrl.sv
+                                       de1soc/uart_tx.sv de1soc/byte_fifo.sv
+                                       de1soc/iq_framer.sv de1soc/DE1_SoC.sv}]]
 
 # Only DE1_SoC is a real board build with pinned-out I/O; the others are
 # core-datapath builds whose I/O is false-pathed for measurement.

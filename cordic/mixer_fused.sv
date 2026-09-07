@@ -146,8 +146,8 @@ module mixer_fused #(
     );
         logic signed [CORDIC_BITS-1:0] shifted, max_val, min_val;
         shifted = v >>> Guard;
-        max_val = (1 <<< (MIX_BITS-1)) - 1;
-        min_val = -(1 <<< (MIX_BITS-1));
+        max_val = (CORDIC_BITS'(1) <<< (MIX_BITS-1)) - CORDIC_BITS'(1);
+        min_val = -(CORDIC_BITS'(1) <<< (MIX_BITS-1));
         if (shifted > max_val)      sat_mix = max_val[MIX_BITS-1:0];
         else if (shifted < min_val) sat_mix = min_val[MIX_BITS-1:0];
         else                        sat_mix = shifted[MIX_BITS-1:0];

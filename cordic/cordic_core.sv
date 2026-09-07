@@ -50,8 +50,8 @@ module cordic_core #(
         logic signed [WIDTH:0] sum;
         logic signed [WIDTH:0] max_val, min_val;
         sum     = {a[WIDTH-1], a} + {b[WIDTH-1], b};
-        max_val = (1 <<< (WIDTH-1)) - 1;
-        min_val = -(1 <<< (WIDTH-1));
+        max_val = ((WIDTH+1)'(1) <<< (WIDTH-1)) - (WIDTH+1)'(1);
+        min_val = -((WIDTH+1)'(1) <<< (WIDTH-1));
         if (sum > max_val)      sat_add = max_val[WIDTH-1:0];
         else if (sum < min_val) sat_add = min_val[WIDTH-1:0];
         else                    sat_add = sum[WIDTH-1:0];
@@ -64,8 +64,8 @@ module cordic_core #(
         logic signed [WIDTH:0] diff;
         logic signed [WIDTH:0] max_val, min_val;
         diff    = {a[WIDTH-1], a} - {b[WIDTH-1], b};
-        max_val = (1 <<< (WIDTH-1)) - 1;
-        min_val = -(1 <<< (WIDTH-1));
+        max_val = ((WIDTH+1)'(1) <<< (WIDTH-1)) - (WIDTH+1)'(1);
+        min_val = -((WIDTH+1)'(1) <<< (WIDTH-1));
         if (diff > max_val)      sat_sub = max_val[WIDTH-1:0];
         else if (diff < min_val) sat_sub = min_val[WIDTH-1:0];
         else                     sat_sub = diff[WIDTH-1:0];
