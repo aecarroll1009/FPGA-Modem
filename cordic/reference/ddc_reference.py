@@ -159,13 +159,9 @@ def cordic_rotate(x, y, z, table: np.ndarray, width: int, shift_mode: str = TRUN
     """Bit-exact rotation-mode CORDIC, vectorised over a whole sample array.
 
     Rotates (x, y) by angle z, scaling the result by K. Pass z0=-theta to
-    rotate by -theta.
-
-    The rotation grows the vector's magnitude monotonically toward K*|v|, so a
-    vector that starts inside the datapath can still clip partway through. That
-    clipping is counted and returned rather than left silent: it is the failure
-    mode a caller most needs to know about, and it is invisible from the output
-    alone.
+    rotate by -theta. The vector's magnitude grows monotonically toward
+    K*|v|, so a value that starts in range can still clip partway through;
+    the count of clipped samples is returned rather than left silent.
 
     Args:
         x, y: Initial vector components, at `width` bits.
@@ -183,10 +179,9 @@ def cordic_rotate(x, y, z, table: np.ndarray, width: int, shift_mode: str = TRUN
     y = np.asarray(y, dtype=np.int64)
     z = np.asarray(z, dtype=np.int64)
 
-    # One flag per sample, not per event. A sample that clips on twelve
-    # consecutive iterations is still one clipped sample, and this count is
-    # summed with fir_decimate's, which counts elements -- so the two have to
-    # be in the same unit or the total means nothing.
+    # One flag per sample, not per event: twelve consecutive clipping
+    # iterations still count as one clipped sample, matching fir_decimate's
+    # per-element count so the two can be summed.
     clipped = saturation_mask(x, width) | saturation_mask(y, width)
     x = sat(x, width)
     y = sat(y, width)
@@ -248,10 +243,8 @@ def prerotate_conj(q, xi, xq, downconvert: bool = True):
     Applies the quadrant part of the rotation before the CORDIC handles the
     residual. Being a multiple of 90 degrees, this needs only sign swaps.
 
-    Up-conversion wants exp(+j*q*pi/2), which is exp(-j*(-q)*pi/2), so
+    Up-conversion wants exp(+j*q*pi/2), which equals exp(-j*(-q)*pi/2), so
     negating the quadrant mod 4 reaches it through the same four cases.
-    That is why the RTL needs one case table rather than two: the direction
-    is a select on the table's index, not a second table.
 
     Args:
         q: Quadrant, 0..3.
@@ -278,13 +271,8 @@ def prerotate_conj(q, xi, xq, downconvert: bool = True):
 def firwin_lowpass(n_taps: int, cutoff_norm: float) -> np.ndarray:
     """Design a window-method lowpass FIR with unit DC gain.
 
-    Uses a Blackman window, whose -74 dB sidelobes suit a 16-bit datapath.
-    That figure is the window's own asymptotic bound, not a promise about
-    any specific filter built from it -- this design's actual measured
-    stopband (README's rate budget) is lower, since a 63-tap filter at a
-    real cutoff doesn't reach the sidelobe floor everywhere, and 16-bit
-    coefficient quantization costs a further margin. Implemented directly
-    rather than via scipy, so this module depends only on numpy.
+    Uses a Blackman window (-74 dB asymptotic sidelobes), implemented
+    directly rather than via scipy so this module depends only on numpy.
 
     Args:
         n_taps: Number of taps; must be odd, for exact linear phase.
@@ -335,22 +323,19 @@ def fir_taps_quantized(
     want = int(round(target_dc * scale))
     q[int(np.argmax(np.abs(q)))] += want - int(q.sum())
 
-    # Checked after the residue correction, not before: the correction lands on
-    # the largest tap, so it is exactly the step most likely to push one out of
-    # range, and clipping it in sat() below would silently lose the DC gain the
-    # correction exists to make exact.
+    # Checked after the residue correction: it lands on the largest tap, the
+    # one most likely to overflow, and clipping it here would silently break
+    # the exact DC gain the correction exists to guarantee.
     if would_saturate(q, coef_bits):
         raise ValueError(
             f"coefficients overflow {coef_bits} bits; widen coef_bits or lower the gain"
         )
     q = sat(q, coef_bits)
 
-    # The residue correction above lands on the largest tap, which for a
-    # windowed lowpass is the centre one -- and a centre tap is its own mirror,
-    # so symmetry survives. That is a property of this filter shape, not a
-    # guarantee: at narrow coef_bits the argmax can move off centre and quietly
-    # cost the exact linear phase firwin_lowpass went out of its way to build
-    # (and break any symmetric-folding FIR in RTL, which assumes h[k]==h[N-1-k]).
+    # The residue correction lands on the largest tap, the centre one for a
+    # windowed lowpass, so symmetry survives -- but only by construction: at
+    # narrow coef_bits the argmax can move off centre and break the linear
+    # phase the RTL's symmetric-folding FIR assumes (h[k] == h[N-1-k]).
     if np.allclose(h, h[::-1]) and not np.array_equal(q, q[::-1]):
         raise ValueError(
             f"quantizing to {coef_bits} bits broke the taps' symmetry, so the "
@@ -405,23 +390,16 @@ def fir_decimate(xi, xq, coef, decim, coef_bits, acc_bits, out_bits, shift_mode)
 def fir_interpolate(xi, xq, coef, interp, coef_bits, acc_bits, out_bits, shift_mode):
     """Run an interpolating FIR on a complex stream.
 
-    Zero-stuffs by `interp` (inserts interp-1 zeros between input samples,
-    raising the sample rate by that factor) then filters causally, with the
-    delay line starting at zero -- the same assumption a real reset filter
-    makes, and the reason this is 'full' convolution truncated to the
-    zero-stuffed length, not 'valid': unlike fir_decimate, there is no
-    window-fill requirement to wait out here, so every output sample counts,
-    including the startup transient while the delay line is still filling.
-    Correct amplitude depends on the taps already targeting a DC gain that
-    includes `interp` (see fir_taps_quantized's target_dc) -- zero-stuffing
-    attenuates by 1/interp on its own, and the filter is what restores it.
+    Zero-stuffs by `interp` (inserts interp-1 zeros between input samples)
+    then filters causally with a zero-initialized delay line, using 'full'
+    convolution truncated to the zero-stuffed length so every output sample
+    counts, including the startup transient. The taps must already target a
+    DC gain that includes `interp` (see fir_taps_quantized's target_dc),
+    since zero-stuffing attenuates by 1/interp on its own.
 
-    This is the direct (zero-stuffed) realization, not the polyphase one the
-    RTL implements -- the two are exactly equal (skipping multiplies by
-    known zeros changes nothing about the result) only because both are
-    causal with the same zero-history convention; using 'valid' convolution
-    here would offset the correspondence by n_taps-1 against the polyphase
-    formula's plain y[n*interp+p] = sum_k coef[p+k*interp]*x[n-k].
+    This is the direct realization; it equals the polyphase one the RTL
+    implements term for term, since both are causal with the same
+    zero-history convention.
 
     Args:
         xi, xq: Input I/Q samples, at the pre-interpolation rate.
@@ -472,13 +450,11 @@ def polyphase_decompose(coef, interp):
     """Split flat filter taps into per-phase index lists for a polyphase interpolator.
 
     Phase p (0 <= p < interp) uses taps at indices p, p+interp, p+2*interp,
-    ..., matching y[n*interp+p] = sum_k coef[p+k*interp] * x[n-k] -- the
-    standard polyphase identity, equal to fir_interpolate()'s zero-stuffed
-    convolution term for term, not an approximation of it (see
-    fir_interpolate()'s docstring). When len(coef) is not a multiple of
-    interp, the phases are uneven by construction: one phase gets one fewer
-    tap than the rest. The RTL reads each phase's tap count from this
-    decomposition rather than assuming they are equal.
+    ..., matching y[n*interp+p] = sum_k coef[p+k*interp] * x[n-k], the
+    standard polyphase identity. When len(coef) is not a multiple of interp,
+    the phases are uneven: one phase gets one fewer tap than the rest, and
+    the RTL reads each phase's tap count from this decomposition rather than
+    assuming they are equal.
 
     Args:
         coef: Quantized filter taps, flat, length N.
@@ -563,11 +539,10 @@ def _validate_lo_below_nyquist(cfg: "DDCConfig") -> None:
     """Validate that the LO sits below the input Nyquist frequency.
 
     An LO above fs_in/2 is not synthesizable as a distinct frequency: the
-    phase accumulator wraps and produces its alias instead, so the mixer
-    quietly down-converts the wrong band. Deliberate bandpass sampling
-    still has an LO inside the first Nyquist zone -- it is the *signal*
-    that folds, not the LO -- so this rejects a genuine configuration
-    error rather than a valid technique.
+    accumulator wraps and the mixer quietly down-converts the alias instead.
+    Bandpass sampling still keeps the LO inside the first Nyquist zone (it is
+    the signal that folds, not the LO), so this rejects a real configuration
+    error, not a valid technique.
 
     Args:
         cfg: The config being validated.
@@ -610,24 +585,17 @@ def _validate_cordic_iterations(cfg: "DDCConfig") -> None:
 class DDCConfig:
     """Every value the RTL needs, as a frozen dataclass.
 
-    Defaults target the DE1-SoC's on-board LTC2308 ADC: a 400 kS/s capture
-    at an 80 kHz carrier, decimated by 8 to a 50 kS/s complex baseband with
-    a 20 kHz passband.
+    Defaults target the DE1-SoC's on-board LTC2308 ADC: 400 kS/s capture at
+    an 80 kHz carrier, decimated by 8 to a 50 kS/s complex baseband with a
+    20 kHz passband. 400 kS/s is set by the LTC2308's datasheet-maximum
+    conversion time (tCONV up to 1.6us) on a 50 MHz SCK clock, not the
+    part's 500 kS/s typical-case ceiling; fir_cutoff clears the resulting
+    decimated Nyquist of fs_in/(2*decim) = 25 kHz.
 
-    The rate is the converter's, not a choice, but it is not the LTC2308's
-    500 kS/s ceiling either: closing the LTC2308's own conversion timing
-    against its *datasheet maximum* -- tCONV up to 1.6us, not the 1.3us
-    typical -- needs a 2.5us sample period, i.e. 400 kS/s, on a 50 MHz
-    SCK-generating clock. 500 kS/s only closes if the part performs at its
-    typical timing, which is a real part in a fixed corner, not a margin.
-    fir_cutoff then has to clear the decimated Nyquist of
-    fs_in/(2*decim) = 25 kHz, which _validate_no_aliasing() enforces.
-
-    f_lo is deliberately not a binary fraction of fs_in. At 100 kHz
-    (fs_in/4) the phase accumulator would divide exactly, exercising no
-    phase truncation at all and flattering every spur measurement; 80 kHz
-    (fs_in/5) leaves a truncation residue, so the reported SFDR is the one
-    the hardware will actually show.
+    f_lo is deliberately not a binary fraction of fs_in: at fs_in/4 the
+    phase accumulator would divide exactly, exercising no phase truncation
+    and flattering every spur measurement, whereas 80 kHz (fs_in/5) leaves a
+    truncation residue that shows the SFDR the hardware will actually reach.
     """
 
     fs_in: float = 400_000.0
@@ -748,14 +716,11 @@ class DDC:
         rx_target_dc = (1.0 / c.k_gain) if self.fold_inv_k else 1.0
         self.coef = fir_taps_quantized(self.h_float, c.coef_bits, rx_target_dc)
 
-        # TX interpolator: same filter shape, but sits *before* the mixer, so
-        # it has to both restore the amplitude zero-stuffing removes (a
-        # factor of `decim`, reused here as the interpolation factor -- RX
-        # and TX are a mirror image at the same rate change) and pre-cancel
-        # the mixer's K, which now runs after it rather than before. Only
-        # meaningful for the fused mixer, which is the only one with an
-        # up-convert path (see mix_stage()); computed unconditionally anyway
-        # since it is cheap and mix_stage() is what actually gates TX use.
+        # TX interpolator: sits before the mixer, so its DC gain must both
+        # restore the amplitude zero-stuffing removes (factor `decim`) and
+        # pre-cancel the mixer's K, which now runs after it. Only meaningful
+        # for the fused mixer's up-convert path; computed unconditionally
+        # since it is cheap.
         self.coef_interp = fir_taps_quantized(
             self.h_float, c.coef_bits, c.decim / c.k_gain
         )
@@ -814,10 +779,10 @@ class DDC:
         q, rem = quadrant_split(self.angle_word(phase), c.ang_bits)
         x0 = np.full(rem.shape, int(round(full_scale(c.cordic_bits) / c.k_gain)), np.int64)
         y0 = np.zeros(rem.shape, np.int64)
-        # The seed rounds to one LSB above full scale, so a few extreme
-        # residuals clip by exactly that LSB -- invisible downstream, since
-        # shr() to data_bits maps full_scale and full_scale-1 to the same
-        # saturated output, so the count is discarded rather than reported.
+        # The 1/K seed rounds to one LSB above full scale, so a few extreme
+        # residuals clip by exactly that LSB. Invisible downstream: shr() to
+        # data_bits maps full_scale and full_scale-1 to the same saturated
+        # output, so the discarded clip count costs nothing.
         x, y, _, _ = cordic_rotate(x0, y0, rem, self.atan, c.cordic_bits, c.shift_mode)
         cos, sin = apply_quadrant_sincos(q, x, y)
         sh = c.cordic_bits - c.data_bits
@@ -859,9 +824,8 @@ class DDC:
         removed later in the FIR/interpolator coefficients.
 
         `downconvert` is a runtime input on silicon, not a build-time
-        parameter, since the taped-out part must serve both RX and TX. Both
-        values therefore have to be verified against this same model; a
-        parameter would let one of them reach the die unexercised.
+        parameter: the taped-out part must serve both RX and TX, so both
+        directions have to be verified against this same model.
 
         Args:
             xi, xq: Input I/Q samples, at data_bits.
@@ -876,14 +840,11 @@ class DDC:
         ri, rq = prerotate_conj(
             q, np.asarray(xi, np.int64), np.asarray(xq, np.int64), downconvert
         )
-        # One guard bit for the K growth. The headroom this buys is against the
-        # complex envelope, not the per-axis word: the rotation is exact only
-        # while |xi + j*xq| <= 2/K ~= 1.21 x full scale, and arbitrary IQ can
-        # reach sqrt(2). Clipping past that happens *inside* the rotation, so
-        # the count comes back from cordic_rotate. Checking only the seeding,
-        # as this used to, reports zero while the band is being corrupted --
-        # and could not have reported anything anyway, since g leaves the
-        # seeded value a factor of two inside cordic_bits by construction.
+        # One guard bit for the K growth. Headroom is against the complex
+        # envelope, not the per-axis word: exact only while
+        # |xi + j*xq| <= 2/K ~= 1.21x full scale; arbitrary IQ can reach
+        # sqrt(2) and clips inside the rotation, so the count comes back
+        # from cordic_rotate rather than being checked only at the input.
         g = c.cordic_bits - c.data_bits - 1
         z0 = -rem if downconvert else rem
         x, y, _, n_rot = cordic_rotate(
@@ -1171,15 +1132,10 @@ def two_tone(n: int, cfg: DDCConfig, offsets=(5_000.0, -12_000.0), amp_dbfs=-6.0
     """Generate an in-band tone plus a second one, both offset from the LO.
 
     Includes one negative-offset tone, so a mirrored spectrum swaps the two
-    tones instead of passing silently.
-
-    Both defaults sit inside the FIR's passband, which is what makes an SNR
-    measured on this stimulus meaningful: a tone beyond fir_cutoff is
-    attenuated *by design*, and scoring the output against an ideal model
-    that also filters it measures mostly filtered-out noise. The offsets are
-    fixed rather than tied to fir_cutoff -- 5/12 kHz clears the current
-    20 kHz cutoff with comfortable margin, but a future rescale that shrinks
-    the passband below 12 kHz would need these revisited.
+    tones instead of passing silently. Both offsets sit inside the FIR's
+    passband, which is what makes SNR measured on this stimulus meaningful:
+    a tone beyond fir_cutoff is attenuated by design, and scoring against a
+    filtered ideal model would mostly measure filtered-out noise.
 
     Args:
         n: Number of samples.
@@ -1285,12 +1241,8 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
     # (tx_mix_i/q, checks tx_top end to end) outputs, from one call to
     # tx_stage() so the two stages cannot desync from each other.
     #
-    # The two tone offsets must stay inside the baseband Nyquist (fs_out/2)
-    # to mean anything as a TX exercise -- a tone beyond it aliases against
-    # itself in this complex baseband, which a rescale can silently produce:
-    # 40/-25 kHz were fine when fs_out was 300 kHz, but fs_out is now 50 kHz
-    # (Nyquist 25 kHz), putting -25 kHz exactly *at* Nyquist and 40 kHz past
-    # it entirely.
+    # The two tone offsets must stay inside the baseband Nyquist (fs_out/2),
+    # or a tone aliases against itself in this complex baseband.
     n_tx = 512
     tx_i = tx_q = None
     if c.mix_arch == MIX_FUSED:
@@ -1480,11 +1432,7 @@ def _measure_ddc_quality(ddc: DDC, cfg: DDCConfig, n: int) -> dict:
 
     # SFDR needs a single tone, measured separately at an offset away from
     # DC and the band edge. The offset is derived from fir_cutoff rather
-    # than fixed: a hardcoded 37 kHz was comfortably inside the passband at
-    # an earlier, wider config, but at fir_cutoff=20 kHz (decimated Nyquist
-    # 25 kHz) it aliased back into the measured band, and the measurement
-    # collapsed from ~58 dB to ~8 dB -- not a datapath regression, just a
-    # tone that had quietly stopped being in-band.
+    # than hardcoded, so it stays in-band if the cutoff changes.
     si, sq = tone(n, cfg.fs_in, cfg.f_lo_actual + cfg.fir_cutoff / 2.0, -6.0, cfg.data_bits)
     rs = ddc.run(si, sq)
     single = (rs["out_i"] + 1j * rs["out_q"]).astype(complex) / scale

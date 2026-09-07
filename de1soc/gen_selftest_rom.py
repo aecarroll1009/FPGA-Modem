@@ -2,17 +2,9 @@
 
 Writes selftest_rom.svh next to this script: a short stimulus sequence and
 the exact output the reference model produces from it. DE1_SoC.sv plays the
-stimulus into rx_top and compares the result on the board, so a programmed
-FPGA reports bit-exactness against the Python model on an LED, with no host
-tooling and no analog signal path involved.
-
-That separation is the point: proving the datapath on real silicon first
-means the ADC and its analog front end are the only suspects once they are
-wired in (see the README's Board bring-up section).
-
-The sequence is deliberately short -- the ROM costs
-2 * N_STIM * data_bits + 2 * N_OUT * out_bits bits of M10K, and nothing is
-learned from a longer one that is not learned from this.
+stimulus into rx_top and compares the result on hardware, with no host
+tooling or analog signal path involved. The sequence is kept short because
+the ROM costs 2 * N_STIM * data_bits + 2 * N_OUT * out_bits bits of M10K.
 
 Usage:
     python de1soc/gen_selftest_rom.py
@@ -69,9 +61,8 @@ def render_selftest_svh(cfg, stim_i, stim_q, out_i, out_q) -> str:
 // self test in DE1_SoC.sv. Produced at the default DDCConfig:
 //   fs_in {cfg.fs_in:.0f} Hz, f_lo {cfg.f_lo_actual:.3f} Hz, decim {cfg.decim},
 //   cutoff {cfg.fir_cutoff:.0f} Hz, data_bits {cfg.data_bits}, out_bits {cfg.out_bits}
-// Regenerate this file whenever any of those change, or the board will be
-// checking the datapath against a different configuration than it is built
-// for and will report a false failure.
+// Regenerate whenever any of those change, or the board checks against a
+// stale configuration and reports a false failure.
 
 `define SELFTEST_N_STIM {len(stim_i)}
 `define SELFTEST_N_OUT {len(out_i)}

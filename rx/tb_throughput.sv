@@ -1,13 +1,10 @@
-// Measures ddc_frontend's sustained throughput in clocks per sample.
+// Measures ddc_frontend's sustained throughput in clocks per sample, the
+// number the README's rate budget and the FIR's cycle budget are built on.
 //
-// Not a pass/fail test -- it produces the number the README's rate budget is
-// built on, and the one every downstream block has to fit inside. Re-run it
-// whenever the CORDIC's iteration count or the mixer's handshake changes,
-// because both move this number and therefore the FIR's cycle budget.
+// Holds in_valid high forever, so the only thing gating acceptance is the
+// mixer's own busy.
 //
-// Holds in_valid high forever so the DUT is never waiting on the source: the
-// only thing gating acceptance is the mixer's own busy. Run via
-// rx/run_throughput.sh.
+// Run via rx/run_throughput.sh.
 
 `timescale 1ns/1ps
 `include "ddc_params.svh"
@@ -41,12 +38,9 @@ module tb_throughput #(
 
     always #5 clk <= ~clk;
 
-    // Measure between the first and last output rather than from reset, so
-    // the reset and pipeline-fill cycles do not skew the rate. That also makes
-    // the counter's origin irrelevant, so it need not be gated on rst_n --
-    // which keeps rst_n a purely asynchronous net, as the DUT uses it.
-    // first_cyc and last_cyc both sample cyc before its increment, so the
-    // constant offset cancels in last_cyc - first_cyc.
+    // Measured between the first and last output, not from reset, so reset
+    // and pipeline-fill cycles do not skew the rate; that also makes cyc's
+    // origin irrelevant, so it needs no rst_n gating.
     int cyc = 0, n_out = 0, first_cyc = -1, last_cyc = 0;
     always @(posedge clk) begin
         cyc <= cyc + 1;

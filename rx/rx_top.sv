@@ -1,24 +1,13 @@
 // Synthesizable top level for the RX chain: ADC-rate IQ in, baseband IQ out.
+// Built by the Quartus flow in syn/ (see syn/build.tcl).
 //
-// This is the unit the Quartus flow in syn/ builds, and it exists so that the
-// rate budget in the README is checked against a real device rather than only
-// against simulation. See syn/build.tcl.
+// Egress is a stub valid/ready stream since the physical link is not chosen
+// yet; syn/rx_top.sdc false-paths that I/O.
 //
-// Egress is deliberately a stub. The physical link (USB, Ethernet, an SoC
-// bridge) is not chosen yet, so the output is a plain valid/ready stream and
-// syn/rx_top.sdc false-paths the I/O. Real I/O constraints arrive with the PHY.
-//
-// Mixer output feeds the decimating FIR, whose own out_valid drives the
-// egress stream at fs_in/DECIM. The FIR has no backpressure input either --
-// same reasoning as the mixer below -- so overflow is checked once, at the
-// egress stream, which is the only place a real consumer can actually stall.
-//
-// Backpressure: neither ddc_frontend nor fir_decimate can be stalled once
-// they have accepted a sample, so out_ready does NOT gate the datapath -- it
-// is an observation point, not a brake. A consumer that deasserts out_ready
-// while out_valid is high loses that sample and latches out_overflow. Keeping
-// up is a system requirement (the budget is in the README); out_overflow is
-// how a violation becomes visible instead of silently corrupting the band.
+// out_ready is an observation point, not a brake: neither ddc_frontend nor
+// fir_decimate can be stalled once they accept a sample, so a consumer that
+// deasserts out_ready while out_valid is high loses that sample and
+// latches out_overflow.
 
 `timescale 1ns/1ps
 

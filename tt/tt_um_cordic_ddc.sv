@@ -1,15 +1,10 @@
-// TinyTapeout wrapper: the CORDIC NCO + fused mixer behind a byte-serial
+// TinyTapeout wrapper: the CORDIC NCO and fused mixer behind a byte-serial
 // interface that fits TinyTapeout's 8 in / 8 out / 8 bidirectional pins.
-//
-// The parallel core needs 65 input and 36 output bits, so it cannot be pinned
-// out directly. The iterative CORDIC spends 19 clocks per sample, and the
-// byte traffic (4 bytes in, 5 out) mostly hides inside that by shifting
-// concurrently on separate ports -- measured cost is 22 clocks/sample, ~16%
-// over the core's own 19, not free but far short of a fully serial cost.
-//
-// The decimating FIR is deliberately NOT here. Its 63-deep sample delay line
-// alone is over a thousand flip-flops, larger than this whole design; it stays
-// off-chip. What tapes out is the part that is actually novel: NCO + mixer.
+// The 65-bit input and 36-bit output cannot be pinned out directly, so
+// samples and results move as serial byte streams that overlap the CORDIC's
+// own 19-clock rotation, costing about 22 clocks per sample.
+// The decimating FIR stays off-chip: its 63-tap delay line alone is over a
+// thousand flip-flops, larger than this whole design.
 //
 // -- pin map ----------------------------------------------------------------
 //   ui_in[7:0]    byte in       sample or config byte
@@ -22,9 +17,9 @@
 //   uio_in[5]     i_down        in:  1 = down-convert (RX), 0 = up-convert (TX)
 //   uio[7:6]      unused, driven low
 //
-// i_down is a pin rather than a config-register bit because the direction is
-// per-sample: it is sampled on the clock the last sample byte lands, so a host
-// can interleave RX and TX samples through the one rotator if it wants to.
+// i_down is a pin, not a config bit, because direction is chosen per sample.
+// It is sampled on the clock the last sample byte lands, so RX and TX
+// samples can interleave through the one rotator.
 //
 // -- framing ----------------------------------------------------------------
 // All multi-byte values are big-endian (most significant byte first).
@@ -35,10 +30,10 @@
 //   result : ceil(2*MIX_BITS/8) bytes -> {pad, mix_i, mix_q}, emitted back to
 //            back with o_valid high.
 //
-// Results are muxed straight out of the mixer's own output registers rather
-// than copied into a shift register, which saves 40 flip-flops. They stay
-// valid until the next rotation completes -- 19 clocks, against 5 to read them
-// out -- and o_ovf latches if a consumer ever misses that window.
+// Results are muxed directly from the mixer's output registers instead of a
+// copied shift register, saving about 40 flip-flops. They remain valid for
+// the full 19-clock rotation, far longer than the 5 clocks needed to read
+// them out, and o_ovf latches if a consumer misses that window.
 
 `timescale 1ns/1ps
 
@@ -84,21 +79,17 @@ module tt_um_cordic_ddc #(
     logic [SampBits-1:0]   in_sr;
     logic [PHASE_BITS-1:0] phase_inc;
     logic [SampCntW-1:0]   samp_cnt;
-    // Latched alongside the last sample byte. ddc_in_valid is registered, so
-    // it asserts one clock after that byte lands and the i_down pin may have
-    // moved on by then -- the same reason xi/xq are read from in_sr and not
-    // from ui_in.
+    // Latched with the last sample byte: ddc_in_valid asserts one clock
+    // later, by which point i_down and ui_in may have already moved on.
     logic                  down_reg;
 
     logic                  ddc_in_valid;
     wire                   ddc_busy;
     wire                   ddc_out_valid;
 
-    // Accept a sample byte whenever the core can take the rotation it will
-    // start -- deliberately not also gated on out_active, since mix_i/mix_q
-    // hold for 19 clocks (far longer than the 5 needed to read them out on
-    // uo_out), so input and output safely overlap. Gating on both would
-    // serialise them and cost ~5 clocks/sample (see the README's I/O table).
+    // i_ready gates only on ddc_busy, not on out_active: mix_i/mix_q hold
+    // for 19 clocks, far longer than the 5 needed to read them out, so
+    // input and output safely overlap.
     logic                  out_active;
     wire                   i_ready = !ddc_busy;
     wire                   take    = i_valid && (i_cfg || i_ready);
@@ -133,9 +124,8 @@ module tt_um_cordic_ddc #(
         end
     end
 
-    // The last byte's shift and ddc_in_valid land on the same clock edge, so
-    // by the cycle in_valid is high in_sr already holds the whole word. Read
-    // it from the register, not from ui_in, which has moved on by then.
+    // in_sr already holds the full word by the cycle ddc_in_valid is high,
+    // so xi/xq read from the register, not from ui_in, which has moved on.
     wire signed [DATA_BITS-1:0] xi = in_sr[SampBits-1 -: DATA_BITS];
     wire signed [DATA_BITS-1:0] xq = in_sr[DATA_BITS-1 : 0];
 
@@ -191,7 +181,7 @@ module tt_um_cordic_ddc #(
 
     wire [OutBytes*8-1:0] out_word = {{OutPad{1'b0}}, mix_i, mix_q};
 
-    // int' cast so the subtraction happens at full width -- out_cnt alone is
+    // int' cast forces the subtraction to full width; out_cnt alone is only
     // OutCntW bits and would truncate the constant.
     assign uo_out = out_active
                   ? out_word[(OutBytes - 1 - int'(out_cnt)) * 8 +: 8]

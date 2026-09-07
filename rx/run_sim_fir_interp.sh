@@ -19,10 +19,9 @@ python3 rx/gen_fir_coef.py
 
 mkdir -p "$SIM_DIR"
 
-# VARHIDDEN, UNUSEDPARAM: ddc_params.svh carries the full DDC config, and the
-# testbench feeds its localparams into the DUT's identically-named
-# parameters (DATA_BITS, ACC_BITS); fir_interpolate takes the rest
-# (INTERP/N_TAPS/etc.) from fir_interp_coef_table.svh instead.
+# VARHIDDEN/UNUSEDPARAM are expected: the testbench feeds ddc_params.svh's
+# DATA_BITS/ACC_BITS into identically-named DUT parameters; fir_interpolate
+# takes the rest (INTERP/N_TAPS/etc.) from fir_interp_coef_table.svh instead.
 verilator --binary --timing -Wall \
     -Wno-VARHIDDEN -Wno-UNUSEDPARAM \
     --top-module tb_fir_interpolate \

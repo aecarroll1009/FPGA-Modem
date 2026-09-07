@@ -1,9 +1,5 @@
 // Seven-segment decoder for the DE1-SoC's HEX displays.
-//
-// Segments are active low on this board (a lit segment is driven 0), which
-// is why "blank" is all ones -- the golden lab designs turn unused displays
-// off with 7'b1111111 for the same reason.
-//
+// Segments are active low, so blank is all ones (7'b1111111).
 // Bit order is {g, f, e, d, c, b, a}, matching the board's HEXn[6:0].
 
 `timescale 1ns/1ps

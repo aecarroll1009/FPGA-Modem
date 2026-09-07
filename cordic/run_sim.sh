@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
 # Regenerates the CORDIC test vectors and runs the self-checking testbench
-# under Verilator. Run from the repo root:
+# under Verilator. Requires Verilator 5.x with --binary support.
 #
-#   ./cordic/run_sim.sh
+# Usage:  ./cordic/run_sim.sh  (run from the repo root)
 #
-# Requires Verilator with --binary support (5.x). If the installed version
-# is too old for --binary, replace the verilator invocation below with a
-# --cc build plus a small C++ harness calling eval() in a loop.
-#
-# Verilator's generated Makefile refuses to build in a directory containing
-# spaces, and this repo's path has one ("FPGA Modem"), so the actual build
-# output goes to a space-free directory outside the repo. Verilator's own
-# SystemVerilog compile step reads sources from the repo fine; only the
-# downstream C++ build needs to live elsewhere.
+# Build output goes to a space-free directory outside the repo, since
+# Verilator's generated Makefile cannot build in a path containing spaces
+# (this repo's does). Verilator's own compile step still reads sources from
+# the repo directly.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

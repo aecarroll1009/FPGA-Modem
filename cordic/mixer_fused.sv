@@ -1,31 +1,11 @@
-// Fused mixer: rotates each input sample by +/-theta directly, using the
-// shared CORDIC core as both the rotator and the mix. No discrete complex
-// multiplier -- prerotate_conj() handles the quadrant's 90-degree part with
-// sign swaps only, and the CORDIC's rotation handles the residual.
+// Fused mixer: rotates each input sample by +/-theta using the shared
+// CORDIC core, with no separate complex multiplier -- prerotate_conj()
+// handles the quadrant's 90-degree part with sign swaps, and the CORDIC's
+// rotation handles the residual. downconvert selects the direction so RX
+// and TX share this one module: 1 rotates by -theta (down-convert, mixing
+// with the NCO's conjugate), 0 rotates by +theta (up-convert).
 //
-// downconvert selects the rotation direction, so RX and TX share this one
-// module instead of two near-duplicates: 1 rotates by -theta (down-convert,
-// mix with the NCO's conjugate), 0 rotates by +theta (up-convert). The two
-// cases differ only in sign -- rotating by +theta is the same computation as
-// rotating by -theta with the quadrant negated mod 4, so eff_quadrant folds
-// the direction into the existing case table rather than duplicating it.
-//
-// It is a port, not a parameter, on purpose. A parameter is frozen at
-// tapeout: the die would do one direction and the other would be untestable
-// silicon. As a port it costs only the select on two muxes that already
-// exist, and both directions are exercised by the same part.
-//
-// The CORDIC's output carries the gain K (~1.6467); that is removed later,
-// in the decimating/interpolating filter's coefficients, not here.
-//
-// in_valid is ignored while busy is high -- the caller must wait for busy
-// to fall before asserting the next sample. xi, xq, quadrant, residual, and
-// downconvert are latched the instant a sample is accepted, so none of them
-// need to stay stable beyond that one cycle. Direction may therefore change
-// from one sample to the next.
-//
-// Reference model: cordic/reference/ddc_reference.py, DDC.mix_fused(), whose
-// `downconvert` argument is this port.
+// Reference model: cordic/reference/ddc_reference.py, DDC.mix_fused().
 
 `timescale 1ns/1ps
 
@@ -38,10 +18,15 @@ module mixer_fused #(
     input  logic                        clk,
     input  logic                        rst_n,
 
-    // 1 = rotate by -theta (RX), 0 = rotate by +theta (TX). Sampled with the
-    // rest of the operands on the accept cycle.
+    // 1 = rotate by -theta (RX), 0 = rotate by +theta (TX). A port rather
+    // than a parameter, since the taped-out part must serve both directions.
+    // Sampled with the rest of the operands on the accept cycle.
     input  logic                        downconvert,
 
+    // Ignored while busy is high; the caller must wait for busy to fall
+    // before asserting the next sample. All operands are latched the
+    // instant a sample is accepted, so direction may change sample to
+    // sample without needing to stay stable beyond that one cycle.
     input  logic                        in_valid,
     input  logic signed [DATA_BITS-1:0] xi,
     input  logic signed [DATA_BITS-1:0] xq,
@@ -50,20 +35,17 @@ module mixer_fused #(
 
     output logic                        busy,
     output logic                        out_valid,
+    // Carries the CORDIC's gain K (~1.6467); removed later in the
+    // decimating/interpolating filter's coefficients, not here.
     output logic signed [MIX_BITS-1:0]  mix_i,
     output logic signed [MIX_BITS-1:0]  mix_q
 );
 
-    // One guard bit is spent leaving headroom for the K growth (K > 1); the
-    // rest widen data_bits up to the CORDIC's own datapath width.
-    //
-    // That headroom is against the complex envelope, not the per-axis word.
-    // The rotation grows |v| monotonically to K*|v|, so it stays exact only
-    // while |xi + j*xq| <= (2**(CORDIC_BITS-1) - 1) / (K * 2**Guard), which at
-    // the default widths is ~1.21x full scale. A rotating tone sits at 1.0x
-    // and is safe; arbitrary IQ reaches sqrt(2) ~= 1.41x and clips inside the
-    // CORDIC's sat_add/sat_sub. That clipping is bit-exact against the
-    // reference model, so it is a backoff budget to respect, not a mismatch.
+    // One guard bit covers the K growth (K > 1); the rest widen data_bits to
+    // CORDIC_BITS. Headroom is against the complex envelope, not per axis:
+    // exact only while |xi+j*xq| <= 2/K ~= 1.21x full scale. Arbitrary IQ can
+    // reach sqrt(2) and clips inside the CORDIC's sat_add/sat_sub, matching
+    // the reference model bit-exactly.
     localparam int Guard        = CORDIC_BITS - DATA_BITS - 1;
     localparam int ResidualBits = ANG_BITS - 2;
 
@@ -84,10 +66,9 @@ module mixer_fused #(
         endcase
     end
 
-    // Sign-extend to the CORDIC's full width *before* shifting, so the
-    // shift only discards redundant sign-replica bits, not real ones -- a
-    // shift confined to a (Guard + DATA_BITS)-bit intermediate would instead
-    // truncate the top of the result.
+    // Sign-extend to the CORDIC's full width before shifting in the Guard
+    // headroom, so the shift discards only redundant sign-replica bits, not
+    // real ones.
     logic signed [CORDIC_BITS-1:0] ri_ext, rq_ext;
     assign ri_ext = {{(CORDIC_BITS-DATA_BITS){ri[DATA_BITS-1]}}, ri};
     assign rq_ext = {{(CORDIC_BITS-DATA_BITS){rq[DATA_BITS-1]}}, rq};

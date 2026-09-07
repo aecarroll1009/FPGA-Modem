@@ -1,20 +1,9 @@
-// Self-checking testbench for the TinyTapeout wrapper.
-//
-// Drives the real byte-serial protocol -- config bytes, then four sample bytes
-// per rotation -- and reassembles the five result bytes, checking them against
-// the same mix_i/mix_q vectors the parallel testbench uses. If the serialised
-// interface loses, reorders, or misaligns a byte, this fails.
-//
-// The direction pin is toggled every sample, so RX and TX rotations interleave
-// through the one rotator. That is the case a build-time parameter could not
-// have expressed, and it is also the one that catches a mistimed capture: the
-// pin is driven to the opposite value the instant each byte has been taken, so
-// the only clock on which it is correct is the one the last sample byte lands.
-// A wrapper that read the pin when the core starts, rather than latching it
-// with the frame, fails every sample here.
-//
-// It also measures the cost of serialisation, which is the reason the wrapper
-// exists: bytes moved per sample versus clocks per sample.
+// Self-checking testbench for the TinyTapeout wrapper: drives the byte-serial
+// protocol, reassembles result bytes, and checks them against the same
+// mix_i/mix_q vectors the parallel testbench uses.
+// The direction pin toggles every sample and is latched only on the clock
+// the last sample byte lands, so RX and TX rotations interleave through the
+// one rotator.
 //
 // Run via tt/run_sim_tt.sh.
 
@@ -68,16 +57,14 @@ module tb_tt_um_cordic_ddc #(
     int n_fail = 0;
     int bytes_in = 0, bytes_out = 0;
 
-    // Free-running and ungated, so rst_n stays a purely asynchronous net (the
-    // DUT resets on it asynchronously). The measurement brackets the sample
-    // loop instead, which also excludes reset and config from the average.
+    // Runs free from reset onward; the sample loop below brackets its own
+    // measurement window to exclude reset and config time from the average.
     int clocks = 0;
     always @(posedge clk) clocks <= clocks + 1;
     int t_start, t_end;
 
-    // Send one byte, holding it until the DUT can take it. `dir` is presented
-    // on the direction pin for exactly the clock the byte lands and inverted
-    // immediately after, so nothing but a capture on that edge can be right.
+    // Send one byte, holding it until the DUT can take it. `dir` is driven
+    // only for the clock the byte lands, then inverted.
     task automatic send_byte(input logic [7:0] b, input logic is_cfg, input logic dir);
         begin
             if (!is_cfg) while (!i_ready) @(posedge clk);
@@ -133,10 +120,8 @@ module tb_tt_um_cordic_ddc #(
 
         t_start = clocks;
 
-        // Send and receive as independent processes, the way a real host with
-        // separate TX and RX paths would drive this. Driving them in sequence
-        // instead would hide the input/output overlap the wrapper allows and
-        // understate the achievable rate by about five clocks per sample.
+        // Send and receive concurrently, as separate TX/RX paths would, so
+        // the measured rate reflects the input/output overlap the wrapper allows.
         fork
             begin : producer
                 for (int i = 0; i < N_TEST; i++) begin

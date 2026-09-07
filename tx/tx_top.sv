@@ -1,32 +1,10 @@
-// Synthesizable top level for the TX chain: baseband IQ in, RF-rate IQ out.
-//
-// Mirror of rx/rx_top.sv, with the filter and mixer swapping order: baseband
-// samples interpolate first, then up-convert, instead of down-convert then
-// decimate.
-//
-// -- the rate mismatch this module exists to bridge -----------------------
-// fir_interpolate produces its INTERP outputs for one baseband sample as
-// fast as its own MAC engine allows (no pacing built in -- see its header),
-// which is far faster than the mixer can accept them: the mixer is
-// iterative and absorbs one sample per rotation, ~19 clocks, not one per
-// clock. Wiring interp's out_valid straight to the mixer's in_valid would
-// silently drop most of the 8 samples, since the mixer only samples
-// in_valid while idle and spends most of its time busy.
-//
-// The fix is a small elastic buffer: every interpolator output is captured
-// into an INTERP-deep queue as it arrives, and drained into the mixer one
-// entry per rotation, at whatever pace the mixer allows. Order is preserved
-// because the interpolator always produces phases 0..INTERP-1 in that
-// order, so a plain write-pointer/read-pointer queue (not a priority
-// structure) is enough. The next baseband sample is not accepted until the
-// queue is fully drained *and* the interpolator is idle -- draining lags
-// well behind computing, so the drain condition is the binding one -- which
-// is what makes the two blocks' very different paces safe to compose.
-//
-// Egress is deliberately a stub, same reasoning as rx_top: no PHY is chosen
-// yet, so out_ready is an observation point and a stalled consumer is
-// reported via a sticky out_overflow rather than silently corrupting the
-// stream. Ingress backpressure (in_ready) is real, same as rx_top's.
+// Synthesizable top level for the TX chain: baseband IQ in, RF-rate IQ out,
+// mirroring rx_top.sv with the interpolator and mixer order swapped.
+// An INTERP-deep elastic queue captures the interpolator's burst of outputs
+// and drains them into the mixer one per rotation, since the mixer accepts
+// only one sample every ~19 clocks while idle.
+// Egress is a stub: out_ready is only observed, and a stalled consumer sets
+// a sticky out_overflow rather than corrupting the stream.
 
 `timescale 1ns/1ps
 
@@ -47,14 +25,14 @@ module tx_top #(
     // replaces this port once there is one.
     input  logic [PHASE_BITS-1:0]       phase_inc,
 
-    // Baseband-rate input stream. in_ready is real backpressure: see the
-    // header note on why the next sample must wait for the queue to drain.
+    // Baseband-rate input stream. in_ready is real backpressure: the next
+    // sample waits until the elastic queue has drained (see header).
     input  logic                        in_valid,
     output logic                        in_ready,
     input  logic signed [DATA_BITS-1:0] bb_i,
     input  logic signed [DATA_BITS-1:0] bb_q,
 
-    // RF-rate IQ egress (stub interface -- see the header note).
+    // RF-rate IQ egress (stub interface; see the header).
     output logic                        out_valid,
     input  logic                        out_ready,
     output logic signed [MIX_BITS-1:0]  rf_i,
@@ -113,11 +91,8 @@ module tx_top #(
         end
     end
 
-    // interp_valid and q_pop are mutually exclusive in the steady flow this
-    // module relies on (see the header note: draining a whole INTERP-deep
-    // queue at ~19 clocks/entry vastly outlasts refilling it), but the
-    // count update handles a simultaneous push+pop correctly regardless,
-    // rather than assuming it away.
+    // interp_valid and q_pop are usually mutually exclusive, but the count
+    // update handles a simultaneous push and pop correctly regardless.
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             q_count <= '0;
@@ -130,10 +105,8 @@ module tx_top #(
         end
     end
 
-    // The next baseband sample is accepted only once the interpolator is
-    // idle *and* the queue is empty -- both, not either: idle alone would
-    // let a new sample start overwriting queue slots the mixer has not
-    // drained yet.
+    // Requires both interp_ready and an empty queue: idle alone would let a
+    // new sample overwrite queue slots the mixer has not drained yet.
     assign in_ready = interp_ready && !q_has_data;
 
     // -- mixer (up-convert) -----------------------------------------------

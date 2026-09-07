@@ -1,18 +1,9 @@
 """Generates the FIR coefficient tables from the reference model.
 
-Writes fir_coef_table.svh (the RX decimator) and fir_interp_coef_table.svh
-(the TX interpolator) next to this script, so the RTL's coefficient ROMs are
-always the same numbers ddc_reference.py computed -- never hand-copied.
-
-The decimator folds the filter around its symmetric taps (h[k] == h[N-1-k]),
-so it only needs the first half of the array: h[0..HALF_TAPS-1], where
-HALF_TAPS = ceil(N_TAPS/2) and the last entry is the centre tap, used
-unpaired. That folding is only valid because fir_taps_quantized() already
-rejects any quantization that breaks exact symmetry -- see ddc_reference.py.
-
-The interpolator does not fold: it needs the full, flat array, addressed by
-its polyphase decomposition (coef[p + k*L] for phase p) rather than by a
-symmetry offset -- see polyphase_decompose() in ddc_reference.py.
+Writes fir_coef_table.svh (the folded RX decimator table) and
+fir_interp_coef_table.svh (the flat, polyphase-addressed TX interpolator
+table) next to this script, so the RTL's coefficient ROMs always match
+ddc_reference.py's computed values.
 
 Usage:
     python rx/gen_fir_coef.py
@@ -87,12 +78,9 @@ localparam logic signed [`FIR_COEF_BITS-1:0] FIR_COEF [0:`FIR_HALF_TAPS-1] = '{{
 def render_fir_interp_coef_svh(coef_interp, coef_bits: int, interp: int) -> str:
     """Render the interpolator's flat coefficient table and phase metadata.
 
-    Unlike the decimator, this table is not folded: the interpolator's
-    polyphase structure (see ddc_reference.py's polyphase_decompose()) reads
-    coef_interp[p + k*interp] directly, needing every tap, addressed by a
-    plain combinational p + k*interp rather than by an offset table -- there
-    is no fold-pairing offset to precompute the way the decimator's centre
-    tap needed.
+    Unlike the decimator, this table is not folded: every tap is stored, at
+    coef_interp[p + k*interp] for phase p (see ddc_reference.py's
+    polyphase_decompose()).
 
     Args:
         coef_interp: The full N_TAPS quantized interpolator taps (DC gain

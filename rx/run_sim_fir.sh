@@ -19,11 +19,9 @@ python3 rx/gen_fir_coef.py
 
 mkdir -p "$SIM_DIR"
 
-# UNUSEDPARAM and VARHIDDEN: ddc_params.svh carries the full DDC config,
-# including fields fir_decimate doesn't take as parameters (it gets N_TAPS
-# etc. from fir_coef_table.svh instead), and the testbench feeds those
-# localparams into the DUT's identically-named parameters. Both expected,
-# same as the other testbenches in this repo.
+# UNUSEDPARAM/VARHIDDEN are expected: fir_decimate takes N_TAPS etc. from
+# fir_coef_table.svh instead, so ddc_params.svh's DATA_BITS-style localparams
+# feed identically-named DUT parameters it doesn't all use.
 verilator --binary --timing -Wall \
     -Wno-VARHIDDEN -Wno-UNUSEDPARAM \
     --top-module tb_fir_decimate \

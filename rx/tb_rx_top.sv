@@ -1,17 +1,9 @@
 // Self-checking testbench for rx_top: the full chain, ADC-rate stimulus in,
 // baseband IQ out.
 //
-// Neither fir_decimate.sv nor ddc_frontend.sv is checked against out_i/out_q
-// in combination anywhere else -- tb_ddc_frontend.sv stops at mix_i/mix_q,
-// and tb_fir_decimate.sv starts from mix_i/mix_q rather than real ADC
-// samples. This is the one testbench that exercises the handshake between
-// them: whether ddc_frontend's out_valid pulse is something fir_decimate
-// actually samples correctly on the same cycle, not just a shape either
-// block assumes about the other.
-//
-// out_ready is held high throughout; out_overflow's meaning (a consumer that
-// stalled) is rx_top's, not this chain's, so it is checked only for staying
-// low, not exercised.
+// Drives build/ddc_vectors/stim_i.hex and stim_q.hex through the DUT and
+// compares iq_i/iq_q against out_i.hex/out_q.hex. out_ready is held high
+// throughout, so out_overflow is checked only for staying low.
 //
 // Run via rx/run_sim_rx_top.sh.
 

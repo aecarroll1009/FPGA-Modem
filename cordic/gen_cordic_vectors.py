@@ -22,9 +22,8 @@ if _REFERENCE_DIR not in sys.path:
 
 import ddc_reference as G
 
-# Derived from the reference model's config rather than restated, so the atan
-# table and the DDC can never be generated against different widths. Changing
-# a width in DDCConfig is enough; rerun this script and the table follows.
+# Derived from the reference model's config rather than restated, so the
+# atan table and the DDC can never disagree on width.
 N_ITER = G.DDCConfig.n_iter
 ANG_BITS = G.DDCConfig.ang_bits
 WIDTH = G.DDCConfig.cordic_bits

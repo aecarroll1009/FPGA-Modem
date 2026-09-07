@@ -19,10 +19,9 @@ python3 rx/gen_fir_coef.py
 
 mkdir -p "$SIM_DIR"
 
-# VARHIDDEN, UNUSEDPARAM, UNUSEDSIGNAL: same reasoning as rx/run_sim_rx_top.sh
-# -- the testbench feeds ddc_params.svh's localparams into tx_top's
-# identically named parameters, several of which are unused by any one
-# submodule alone.
+# VARHIDDEN, UNUSEDPARAM, UNUSEDSIGNAL: same reasoning as rx/run_sim_rx_top.sh.
+# The testbench feeds ddc_params.svh's localparams into tx_top's identically
+# named parameters, several of which are unused by any one submodule alone.
 verilator --binary --timing -Wall \
     -Wno-VARHIDDEN -Wno-UNUSEDPARAM -Wno-UNUSEDSIGNAL \
     --top-module tb_tx_top \

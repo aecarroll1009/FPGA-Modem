@@ -1,8 +1,5 @@
 """Tests for the DDC reference model.
 
-Several tests construct a known failure case directly and confirm the
-corresponding check flags it, since a test that cannot fail is not evidence.
-
 Run:  python cordic/reference/test_ddc_reference.py
 """
 
@@ -38,15 +35,10 @@ from ddc_reference import DDCConfig, DDC, MIX_SEPARATE, MIX_FUSED, TRUNC, ROUND
 def _in_band_offset(cfg):
     """Pick a test-tone offset from the LO that survives the whole RX chain.
 
-    Tests that follow a tone through to the decimated output need it inside
-    the FIR's passband *and* inside the decimated Nyquist, or the tone is
-    either attenuated by the filter or folded by the decimation -- and a
-    folded tone looks exactly like a mirrored spectrum, which is what
-    several of these tests are trying to detect. Half the cutoff clears both
-    limits with margin at any rate, which a hardcoded frequency does not:
-    this project has been rescaled twice already, and each time moved
-    fs_out enough that a fixed offset picked for the old rate landed outside
-    the new decimated Nyquist.
+    Needs to sit inside both the FIR's passband and the decimated Nyquist,
+    or the tone is attenuated or folded -- and a folded tone looks exactly
+    like a mirrored spectrum, which several of these tests test for. Half
+    the cutoff clears both limits with margin at any configured rate.
 
     Args:
         cfg: The DDC configuration.
@@ -858,9 +850,8 @@ def test_decimation_takes_the_right_phase():
 
 
 def test_aliasing_cutoff_is_rejected():
-    # A cutoff above the *decimated* Nyquist, derived from the defaults rather
-    # than hardcoded, so this keeps testing the validator and not a rate the
-    # project has since moved off.
+    # A cutoff above the *decimated* Nyquist, derived from the defaults
+    # rather than hardcoded, so it stays valid at any configured rate.
     cfg = DDCConfig()
     bad = cfg.fs_in / cfg.decim / 2.0 * 1.5
     try:
@@ -881,13 +872,10 @@ def test_fixed_point_tracks_the_ideal_model():
     """Whole-chain quality at the default config.
 
     The NCO threshold is deliberately not the ~90 dB an LO like fs/4 or fs/8
-    scores. Those divide the phase accumulator exactly (phase_trunc_residue
-    == 0), exercising no phase truncation at all, and the default LO no
-    longer does: at 80 kHz on a 400 kS/s clock the residue is non-zero, so
-    truncation spurs set the floor and the honest number is ~74 dB. That is
-    the same hardware measured at a representative LO, not a regression --
-    see test_phase_truncation_only_bites_when_the_fcw_exercises_it, which
-    pins both cases against each other.
+    scores: those divide the phase accumulator exactly (phase_trunc_residue
+    == 0), exercising no phase truncation. The default 80 kHz LO on a
+    400 kS/s clock has a non-zero residue, so truncation spurs set the floor
+    and ~74 dB is the honest number for this hardware at a representative LO.
     """
     cfg = DDCConfig()
     m = G.report(cfg, n=8192)
@@ -1021,11 +1009,9 @@ def test_phase_truncation_only_bites_when_the_fcw_exercises_it():
 
     An LO that is a binary fraction of fs discards only zero bits, so
     truncation costs it nothing; any other LO pays the ~6.02*N spur penalty.
-    Both cases are constructed here rather than one of them being inherited
-    from the default config: the default LO used to be the benign case and is
-    now deliberately the truncating one (see DDCConfig's docstring), and a
-    test that silently depends on which it is stops testing the mechanism the
-    moment that choice changes.
+    Both cases are constructed directly here rather than inherited from the
+    default config, so the test does not depend on which case the default
+    LO happens to be.
     """
     cfg = DDCConfig()
     ddc = DDC(cfg)

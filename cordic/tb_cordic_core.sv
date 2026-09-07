@@ -6,9 +6,8 @@
 // cordic/run_sim.sh, which regenerates the vectors first so the
 // RTL and the checked values can never drift apart.
 //
-// start is held until busy acknowledges it, rather than pulsed for one
-// guessed cycle, so the handshake is correct regardless of which state the
-// DUT happens to be in when a new vector begins.
+// start is held until busy acknowledges it, so the handshake is correct
+// regardless of which state the DUT is in when a new vector begins.
 
 `timescale 1ns/1ps
 `include "cordic_atan_table.svh"

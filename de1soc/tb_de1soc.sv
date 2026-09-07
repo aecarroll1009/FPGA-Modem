@@ -1,16 +1,8 @@
-// Self-checking testbench for the DE1-SoC board top level.
-//
-// The board design is itself a self test, so this checks the checker: that
-// it plays the whole stimulus, receives every expected output, reports zero
-// mismatches, and lights the pass LED. A board wrapper is exactly the kind
-// of code that is easy to get subtly wrong (an off-by-one on the last
-// output, a comparison against the wrong index, a done flag that never
-// sets) and hard to debug once it is only observable through ten LEDs.
-//
-// It also checks the negative case: with the expected-output ROM
-// deliberately mismatched, the design must report failure rather than pass.
-// Without that, a wrapper that compared nothing at all would look identical
-// to one that worked.
+// Self-checking testbench for the DE1-SoC board top level: plays the
+// self-test stimulus through the DUT and checks it reports the right
+// pass/fail/count on its LEDs and HEX displays.
+// A second module, tb_de1soc_negative, feeds a deliberately mismatched
+// expectation and checks the DUT reports failure rather than pass.
 //
 // Run via de1soc/run_sim_de1soc.sh.
 
@@ -108,8 +100,7 @@ module tb_de1soc;
 endmodule
 
 
-// Same design, but fed a corrupted expectation, to prove the pass LED is
-// actually a function of the comparison and not stuck on.
+// Fed a deliberately mismatched expectation; the DUT must report failure.
 module tb_de1soc_negative;
 
     logic        CLOCK_50 = 0;
@@ -120,12 +111,8 @@ module tb_de1soc_negative;
     wire         ADC_CONVST, ADC_SCLK, ADC_DIN;
     logic        ADC_DOUT = 1'b0;
 
-    // Same design, built at a different LO than the ROM was generated for.
-    // Every output is then legitimately different from the expectation, so
-    // a working comparison must report failure. Overriding the parameter is
-    // preferable to forcing internals: it corrupts the design's *input*
-    // rather than reaching inside it, so what is being tested stays the
-    // real comparison path.
+    // Overrides PHASE_INC so every output legitimately mismatches the ROM's
+    // expectation -- corrupts the design's input rather than forcing internals.
     DE1_SoC #(.PHASE_INC(`SELFTEST_PHASE_INC ^ 24'h000100)) dut (
         .CLOCK_50   (CLOCK_50),
         .KEY        (KEY),

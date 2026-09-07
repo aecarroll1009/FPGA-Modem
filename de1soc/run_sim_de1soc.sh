@@ -23,13 +23,11 @@ SRC="cordic/cordic_core.sv cordic/nco.sv cordic/mixer_fused.sv
      rx/ddc_frontend.sv rx/fir_decimate.sv rx/rx_top.sv
      de1soc/hex7seg.sv de1soc/DE1_SoC.sv de1soc/tb_de1soc.sv"
 
-# UNUSEDSIGNAL: the board top declares board pins it deliberately does not
-# use yet (SW, the spare KEYs, ADC_DOUT); they are collected into an
-# explicit _unused_ok term rather than omitted, so the pin assignments stay
-# in place for the ADC work.
-# DECLFILENAME: tb_de1soc.sv holds both the positive and the negative
-# testbench on purpose -- they instantiate the same DUT the same way, and
-# splitting them would duplicate that wiring for no benefit.
+# UNUSEDSIGNAL: board pins not yet used (SW, spare KEYs, ADC_DOUT) are
+# collected into _unused_ok rather than omitted, so pin assignments stay in
+# place for the ADC work.
+# DECLFILENAME: tb_de1soc.sv holds both the positive and negative testbench,
+# since they instantiate the same DUT the same way.
 build_and_run () {
     local top="$1"
     verilator --binary --timing -Wall \

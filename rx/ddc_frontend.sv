@@ -1,12 +1,10 @@
-// Wires the phase/angle path to the fused mixer: the front end from input
-// samples to the mixer's IQ output, before any filtering.
+// Wires the phase/angle path (nco) to the fused mixer (mixer_fused): input
+// samples to IQ output, before any filtering.
 //
 // `downconvert` selects the direction at run time, so this is the DDC front
-// end when it is high and the DUC's mixer stage when it is low. The name is
-// kept for continuity with the RX chain it was written for; the module is
-// direction-agnostic.
+// end when high and the DUC's mixer stage when low.
 //
-// in_valid is ignored while busy is high -- accept mix_i/mix_q on out_valid
+// in_valid is ignored while busy is high; accept mix_i/mix_q on out_valid
 // and do not assert the next in_valid until busy falls.
 //
 // Reference model: cordic/reference/ddc_reference.py, DDC.mix_stage().

@@ -7,9 +7,8 @@
 // self test in DE1_SoC.sv. Produced at the default DDCConfig:
 //   fs_in 400000 Hz, f_lo 79999.995 Hz, decim 8,
 //   cutoff 20000 Hz, data_bits 16, out_bits 16
-// Regenerate this file whenever any of those change, or the board will be
-// checking the datapath against a different configuration than it is built
-// for and will report a false failure.
+// Regenerate whenever any of those change, or the board checks against a
+// stale configuration and reports a false failure.
 
 `define SELFTEST_N_STIM 512
 `define SELFTEST_N_OUT 57

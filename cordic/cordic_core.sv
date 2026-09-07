@@ -1,20 +1,11 @@
 // Iterative rotation-mode CORDIC core.
 //
 // Rotates (x_in, y_in) by angle z_in and scales the result by K, driving z
-// toward zero. One iteration per clock; a rotation takes CORDIC_N_ITER
-// cycles, with done asserted for one cycle once the result is valid.
-//
-// Angle convention: z is signed, in units of one CORDIC_ANG_BITS-wide full
-// circle. A positive z rotates counter-clockwise; seed z_in negative to
-// rotate the other way.
-//
-// This block implements the rotation only, not the quadrant range reduction
-// that lifts a residual angle in [0, pi/2) to the full circle -- that lives
-// in the NCO and mixer wrappers that instantiate this core. Only truncating
-// (floor) shifts are implemented, matching the reference model's default.
-//
-// Reference model: cordic/reference/ddc_reference.py, cordic_rotate().
-// Verified bit-exact against it in cordic/tb_cordic_core.sv.
+// toward zero over CORDIC_N_ITER cycles, one iteration per clock, with done
+// pulsed once the result is valid. Quadrant range reduction to a residual in
+// [0, pi/2) happens in the NCO/mixer wrappers that instantiate this core,
+// not here. Reference model: cordic/reference/ddc_reference.py,
+// cordic_rotate().
 
 `timescale 1ns/1ps
 `include "cordic_atan_table.svh"
@@ -28,6 +19,8 @@ module cordic_core #(
     input  logic                             start,
     input  logic signed [WIDTH-1:0]          x_in,
     input  logic signed [WIDTH-1:0]          y_in,
+    // Signed, in units of one full circle = 2**CORDIC_ANG_BITS. Positive
+    // rotates counter-clockwise; seed negative to rotate the other way.
     input  logic signed [`CORDIC_ANG_BITS-1:0] z_in,
 
     output logic                             busy,
@@ -79,9 +72,9 @@ module cordic_core #(
     endfunction
 
     // Next-state combinational logic for one CORDIC iteration. z's sign bit
-    // selects the rotation direction; z itself is never saturated, since its
+    // selects the rotation direction. z itself is never saturated: its
     // magnitude stays within CORDIC_ANG_BITS by construction for any input
-    // the quadrant range reduction upstream can produce.
+    // the upstream range reduction can produce.
     logic                             sign_neg;
     logic signed [WIDTH-1:0]          x_shift, y_shift;
     logic signed [WIDTH-1:0]          x_next, y_next;

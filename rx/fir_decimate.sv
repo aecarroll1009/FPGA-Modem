@@ -1,45 +1,11 @@
-// Decimating FIR: folds the filter's linear-phase symmetry to halve the
-// multiply count, and decimates by DECIM in the same pass.
+// Decimating FIR: folds the filter's linear-phase symmetry (h[k] ==
+// h[N_TAPS-1-k]) to halve the multiply count, and decimates by DECIM in the
+// same pass.
 //
-// The filter is odd-length and symmetric (h[k] == h[N_TAPS-1-k]), so
-// h[k]*x[n-k] + h[N_TAPS-1-k]*x[n-(N_TAPS-1-k)] collapses to
-// h[k]*(x[n-k] + x[n-(N_TAPS-1-k)]) -- one multiply buys two taps. That
-// folding is bit-exact, not an approximation: it only depends on the taps
-// being exactly palindromic, which fir_taps_quantized() enforces at
-// generation time (see cordic/reference/ddc_reference.py) and
-// rx/gen_fir_coef.py checks again before emitting the table. HALF_TAPS
-// multiplies replace N_TAPS, at the cost of one MAC step per clock instead
-// of all of them at once -- the CORDIC's 19-clock sample spacing leaves
-// enough slack for this to be free (see the README's rate budget).
-//
-// -- delay line -----------------------------------------------------------
-// Each rail (I, Q) keeps two mirrored copies of its sample history, so the
-// folded sum's two taps can be read in the same cycle without a true
-// dual-read-port memory. Depth is the next power of two at or above 2*N_TAPS
-// (128 for N_TAPS=63) rather than exactly N_TAPS, so the write pointer can
-// never lap a sample the in-flight MAC still needs: a MAC run takes about
-// HALF_TAPS clocks, and at most a couple of new samples can land during that
-// window at the mixer's 19-clocks-per-sample rate -- far short of even one
-// extra pass around a 63-deep buffer, let alone a 128-deep one.
-//
-// -- decimation -------------------------------------------------------------
-// The first output needs N_TAPS accepted samples (matching
-// np.convolve(..., 'valid')'s first valid window); every DECIM-th accepted
-// sample after that produces the next one. Checked bit-exact against
-// fir_decimate() in tb_fir_decimate.sv.
-//
-// -- accumulation and output ------------------------------------------------
-// The accumulator is kept wider than ACC_BITS internally so the exact
-// (unsaturated) sum is always available -- matching the reference model's
-// int64 accumulation -- and is saturated to ACC_BITS only once, at the end,
-// not per MAC step. The output shift is a floor (arithmetic) shift by
-// COEF_BITS-1, then a second saturation to OUT_BITS. Neither saturation
-// fires at the default widths: summing |coefficient| x 2 (each non-centre
-// tap is folded, so it scales two input samples) x full-scale input, over
-// the actual coefficient table, bounds the worst case at about 2^30.6 --
-// comfortably inside the 40-bit accumulator, with ~9 bits to spare for a
-// future coefficient or width change. The saturation exists so such a
-// change fails loudly in simulation instead of wrapping silently.
+// Two mirrored copies of each rail's sample history let the folded sum's two
+// taps be read in the same cycle without a true dual-read-port memory, and a
+// two-stage address-generate/multiply-accumulate pipeline produces one
+// output every DECIM accepted samples.
 //
 // Reference model: cordic/reference/ddc_reference.py, fir_decimate().
 
@@ -102,10 +68,9 @@ module fir_decimate #(
     end
 
     // -- fill/decimation counters: when to start a MAC run -----------------
-    // filled latches once NTaps samples have ever been accepted; the trigger
-    // fires on that same accept (the sample completing the first full
-    // window), matching valid convolution's first output. Every DECIM-th
-    // accept after that fires again.
+    // filled latches once NTaps samples have been accepted; the trigger
+    // fires on that accept (matching valid convolution's first window), then
+    // every DECIM-th accept after that.
     localparam int FillBits = $clog2(NTaps);
     localparam int DecBits  = $clog2(DECIM);
 
@@ -132,7 +97,7 @@ module fir_decimate #(
             if (in_valid) begin
                 // synthesis translate_off
                 if (will_trigger && mac_state != IDLE)
-                    $fatal(1, "fir_decimate: new trigger while a MAC run is still in flight -- the 19-clocks-per-sample rate assumption in the header comment was violated");
+                    $fatal(1, "fir_decimate: new trigger while a MAC run is still in flight");
                 // synthesis translate_on
 
                 newest_addr <= wr_ptr;
@@ -159,18 +124,14 @@ module fir_decimate #(
     end
 
     // -- MAC engine ----------------------------------------------------------
-    // Two-stage pipeline, address-generate then multiply-accumulate, so the
-    // delay line's reads are registered rather than combinational -- required
-    // for Quartus to map ram_i_a/b and ram_q_a/b onto M10K block RAM instead
-    // of flip-flops with a wide mux (see the README's synthesis section for
-    // the numbers). The extra pipeline cycle per MAC step is free against the
-    // 152-clock decimation budget.
+    // Two-stage pipeline (address-generate, then multiply-accumulate) so the
+    // delay-line reads are registered, not combinational -- required for
+    // Quartus to map the RAMs onto M10K block RAM instead of flip-flops.
     typedef enum logic [1:0] {IDLE, RUN, FINISH} mac_state_t;
     mac_state_t mac_state;
 
     // Latched once when the run starts, not read live: newest_addr keeps
-    // advancing as new samples are accepted, and at 19 clocks/sample at
-    // least one more accept lands during a ~34-cycle run. Addressing off the
+    // advancing as new samples arrive during the run, and addressing off the
     // live register would walk onto a window that shifted mid-computation.
     logic [AddrW-1:0] base_addr;
 
@@ -186,9 +147,8 @@ module fir_decimate #(
     assign addr_b = base_addr - (AddrW)'(NTaps - 1) + (AddrW)'(k);
 
     // Stage 2: the registered read, one cycle behind the address that
-    // produced it -- this is what makes the read synchronous. k_d1/mac_valid
-    // are k/issuing carried along the same one-cycle delay, so the tap index
-    // and coefficient always match the data that just arrived.
+    // produced it. k_d1/mac_valid carry k/issuing along the same delay, so
+    // the tap index and coefficient match the data that just arrived.
     logic signed [IN_BITS-1:0] rd_i_a, rd_i_b, rd_q_a, rd_q_b;
     logic [KBits-1:0] k_d1;
     logic             mac_valid;
@@ -203,9 +163,11 @@ module fir_decimate #(
     logic is_centre_d1;
     assign is_centre_d1 = (k_d1 == CentreIdx);
 
-    // One guard bit for the pre-add: two IN_BITS values summing can exceed
-    // IN_BITS by exactly one bit. The centre tap uses rd_*_a alone -- doubling
-    // it would count that sample twice, since addr_b equals addr_a there.
+    // Folded pair: h[k]*(x[n-k] + x[n-(N-1-k)]) replaces two separate
+    // multiplies, valid because the taps are exactly symmetric (enforced
+    // when fir_coef_table.svh is generated). One guard bit covers the
+    // pre-add headroom; the centre tap uses rd_*_a alone, since addr_b
+    // equals addr_a there and doubling it would count the sample twice.
     logic signed [IN_BITS:0] term_i, term_q;
     assign term_i = is_centre_d1
         ? {rd_i_a[IN_BITS-1], rd_i_a}
@@ -217,20 +179,20 @@ module fir_decimate #(
     logic signed [CoefBits-1:0] coef_k_d1;
     assign coef_k_d1 = FIR_COEF[k_d1];
 
-    // Declared at the product's true full width (CoefBits + (IN_BITS+1)) and
-    // computed by a plain assignment, not a sizing cast: `Wide'(a*b)` would
-    // evaluate a*b in the self-determined width of its narrower operands
-    // first and only extend the (already truncated) result afterward, which
-    // silently discards the product's high bits. A declared wire of the
-    // right width gives the multiply its context directly.
+    // Declared at the product's true width (CoefBits + IN_BITS + 1) and
+    // computed by plain assignment, not `Wide'(a*b)`: that cast would
+    // evaluate a*b at the narrower operand width first, silently discarding
+    // the product's high bits before extending.
     localparam int ProdBits = CoefBits + IN_BITS + 1;
     logic signed [ProdBits-1:0] prod_i, prod_q;
     assign prod_i = coef_k_d1 * term_i;
     assign prod_q = coef_k_d1 * term_q;
 
-    // Wide enough that the exact HALF_TAPS-term sum can never wrap this
-    // register, even for a pathological all-same-sign, full-scale input --
-    // see the header note on where the one-time ACC_BITS saturation happens.
+    // Worst case: |coefficient| x 2 (each non-centre tap sums two folded
+    // samples) x full-scale input, summed over the real coefficient table,
+    // bounds the exact sum at about 2^30.6 -- comfortably inside ACC_BITS=40
+    // itself, let alone this ACC_BITS+8 register, so the sum never wraps
+    // before the one-time saturation in sat_shift() below.
     localparam int WideAcc = ACC_BITS + 8;
     logic signed [WideAcc-1:0] acc_i, acc_q;
 

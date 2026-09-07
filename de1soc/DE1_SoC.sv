@@ -1,13 +1,8 @@
 // DE1-SoC board top level: the RX chain, self-testing against the reference
 // model on real silicon.
-//
-// This is the first bring-up stage, and it deliberately contains no ADC --
-// see the README's Board bring-up section for why. Stimulus comes from an
-// on-chip ROM and the expected response from the same reference model the
-// simulation testbenches use, so a programmed board answers exactly one
-// question: does the synthesized datapath produce, on hardware, the bits
-// the model says it should? de1soc/ltc2308_ctrl.sv is verified standalone
-// but not yet wired in here.
+// Stimulus comes from an on-chip ROM; the expected response comes from the
+// same reference model the simulation testbenches use.
+// de1soc/ltc2308_ctrl.sv is verified standalone but not yet wired in here.
 //
 // -- what it does ---------------------------------------------------------
 // Plays SELFTEST_N_STIM samples into rx_top as fast as it will take them
@@ -28,9 +23,7 @@
 //   HEX5:HEX4  blank
 //
 // -- ADC port -------------------------------------------------------------
-// The LTC2308 pins are declared and parked at idle rather than left out, so
-// the pin assignments are in place and the board is not driving the ADC
-// while there is no controller to drive it properly.
+// LTC2308 pins are parked at idle; no controller drives them yet.
 //
 // Reference model: cordic/reference/ddc_reference.py. Regenerate the ROM
 // with de1soc/gen_selftest_rom.py after any config change.
@@ -40,9 +33,8 @@
 
 module DE1_SoC #(
     // The LO the board runs at. Defaults to the value the self-test ROM was
-    // generated against -- override it and the expected outputs no longer
-    // apply, which is exactly what tb_de1soc_negative does to prove the
-    // comparison below is real.
+    // generated against; overriding it makes the expected outputs invalid
+    // (used by tb_de1soc_negative).
     parameter logic [23:0] PHASE_INC = `SELFTEST_PHASE_INC
 ) (
     input  logic        CLOCK_50,

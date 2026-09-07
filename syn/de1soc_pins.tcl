@@ -1,17 +1,14 @@
 # DE1-SoC pin assignments for the signals this project uses.
 #
-# Lifted verbatim from the golden Terasic pinout (via a DE1_SoC.qsf that was
-# built and run on real hardware), narrowed to the pins the modem touches:
-# the 50 MHz clock, the user I/O it reports status on, and the LTC2308 ADC
-# port. Every FPGA-side pin here is 3.3-V LVTTL, which the Cyclone V handbook
-# confirms is supported on FPGA I/O.
+# Copied from the Terasic DE1_SoC.qsf reference pinout, narrowed to the pins
+# used here: the 50 MHz clock, status I/O, and the LTC2308 ADC port. All
+# FPGA-side pins are 3.3-V LVTTL, per the Cyclone V handbook.
 #
-# Only assigned pins are constrained, so syn/build.tcl also reserves the rest
-# as tri-stated inputs -- on this board the unassigned pins land on SDRAM,
-# HPS and codec nets, and Quartus's default of driving unused pins would put
-# the FPGA in contention with them.
+# Only assigned pins are constrained; syn/build.tcl reserves the rest as
+# tri-stated inputs, since unassigned pins on this board land on SDRAM, HPS,
+# and codec nets that Quartus's default drive would contend with.
 #
-# Regenerate/extend by copying further lines out of the golden qsf; do not
+# Regenerate/extend by copying further lines from the reference qsf; do not
 # hand-edit pin numbers.
 set_location_assignment PIN_AJ4 -to ADC_CONVST
 set_location_assignment PIN_AK4 -to ADC_DIN

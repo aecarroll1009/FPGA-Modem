@@ -3,40 +3,11 @@
 //
 // Realized as a polyphase filter, not literal zero-stuffing: phase p's
 // output is sum_k FIR_INTERP_COEF[p + k*INTERP] * x[n-k], run directly
-// against the un-stuffed input history. This is exactly equal to
-// zero-stuffing then filtering, not an approximation of it -- INTERP-1 out
-// of every INTERP terms in the zero-stuffed sum multiply a known zero, and
-// skipping them changes nothing about the result (see polyphase_decompose()
-// in cordic/reference/ddc_reference.py, and fir_interpolate() there for the
-// zero-stuffed reference this is checked bit-exact against).
+// against the un-stuffed input history, exactly equal to zero-stuffing then
+// filtering since the terms it skips all multiply a known zero.
 //
-// -- why this needs no fold, and no addressed RAM -------------------------
-// The decimator folds its 63 taps around their linear-phase symmetry and
-// needs a 128-deep circular buffer per rail, because a new sample can land
-// mid-computation (it runs continuously at the mixer's 19-clocks-per-sample
-// rate). Neither pressure applies here: this filter's coefficients are not
-// symmetric within a phase (a phase is an arbitrary sub-sampling of the
-// taps, not a mirror pair), and in_ready is deliberately not asserted again
-// until all INTERP phases for the current sample have been produced, so no
-// new sample can ever arrive mid-computation -- there is no race to guard
-// against. That also means the history only needs to hold the longest
-// phase's reach (FIR_INTERP_MAX_PHASE_LEN samples, 8 by default), so it is a
-// plain shift register, not an addressed circular buffer: hist_i[k] is
-// x[n-k] directly, with no address arithmetic to get wrong.
-//
-// -- coefficients -----------------------------------------------------------
-// FIR_INTERP_COEF is flat (not folded) and FIR_INTERP_PHASE_LEN[p] gives
-// each phase's tap count directly, since N_TAPS is not a multiple of INTERP
-// in general (63/8 leaves one phase with 7 taps instead of 8) -- see
-// rx/gen_fir_coef.py.
-//
-// -- reset ------------------------------------------------------------------
-// The history shift register is explicitly reset to zero, not left as X:
-// unlike fir_decimate, this filter produces output from the very first
-// accepted sample, using whatever history exists so far -- there is no
-// window-fill period to wait out first (see fir_interpolate()'s docstring).
-// That only matches the reference model if "no history yet" reads as zero
-// on both sides.
+// Reference model: cordic/reference/ddc_reference.py, fir_interpolate() and
+// polyphase_decompose().
 
 `timescale 1ns/1ps
 `include "fir_interp_coef_table.svh"
@@ -74,10 +45,16 @@ module fir_interpolate #(
     wire accept = in_valid && in_ready;
 
     // -- history: a plain shift register, not an addressed buffer ----------
+    // in_ready stays low until all INTERP phases for a sample finish, so no
+    // new sample can arrive mid-computation and the history need only hold
+    // the longest phase's reach (MaxLen taps).
     // hist_i[0]/hist_q[0] is x[n] (newest), hist_i[MaxLen-1] is x[n-MaxLen+1].
     logic signed [DATA_BITS-1:0] hist_i [0:MaxLen-1];
     logic signed [DATA_BITS-1:0] hist_q [0:MaxLen-1];
 
+    // Reset to zero, not X: output starts from the first accepted sample
+    // using whatever history exists so far, so "no history yet" must read
+    // as zero to match the reference model.
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (int i = 0; i < MaxLen; i++) begin
@@ -114,7 +91,7 @@ module fir_interpolate #(
     assign tap_q = hist_q[k];
 
     // Declared at the product's true width and computed by a plain
-    // assignment, not a sizing cast -- see fir_decimate.sv's header for why
+    // assignment, not a sizing cast -- see fir_decimate.sv for why
     // `Wide'(a*b)` truncates the product before extending it.
     localparam int ProdBits = CoefBits + DATA_BITS;
     logic signed [ProdBits-1:0] prod_i, prod_q;

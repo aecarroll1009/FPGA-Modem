@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Measures ddc_frontend's sustained clocks-per-sample under Verilator and
-# prints the cycle budget every downstream block has to fit inside. This is
-# where the README's rate-budget numbers come from. Run from the repo root:
+# prints the cycle budget every downstream block has to fit inside. Run from
+# the repo root:
 #
 #   ./rx/run_throughput.sh
-#
-# Reuses the generated ddc_params.svh for the widths and PHASE_INC, so it
-# cannot drift from the configuration the rest of the RTL is built against.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

@@ -1,16 +1,12 @@
 // Self-checking testbench for fir_interpolate.
 //
-// Drives the TX baseband stimulus (build/ddc_vectors/tx_stim_i.hex, at the
-// pre-interpolation rate) in one sample at a time, and checks every one of
-// the INTERP outputs each input produces, in order, against interp_i.hex --
-// the reference model's own fir_interpolate() output, which is INTERP times
-// longer than the stimulus. Since the RTL is a polyphase realization and the
-// reference is the direct zero-stuffed one, this is also the test that would
-// catch a wrong INTERP*n+p indexing, not just a wrong tap value.
+// Drives the TX baseband stimulus (build/ddc_vectors/tx_stim_i.hex) one
+// sample at a time and checks every one of the INTERP outputs it produces,
+// in order, against interp_i.hex -- the reference model's own
+// fir_interpolate() output.
 //
-// Run via rx/run_sim_fir_interp.sh, which regenerates the vectors and the
-// coefficient table first so the RTL and the checked values can never drift
-// apart.
+// Run via rx/run_sim_fir_interp.sh, which regenerates the vectors and
+// coefficient table first.
 
 `timescale 1ns/1ps
 `include "ddc_params.svh"

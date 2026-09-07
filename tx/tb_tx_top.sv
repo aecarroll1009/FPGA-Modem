@@ -1,14 +1,7 @@
 // Self-checking testbench for tx_top: the full TX chain, baseband-rate
-// stimulus in, RF-rate IQ out.
-//
-// Neither fir_interpolate.sv nor mixer_fused.sv is checked against
-// tx_mix_i/tx_mix_q anywhere else -- tb_fir_interpolate.sv stops at
-// interp_i/interp_q, and the up-convert mixer tests in
-// test_ddc_reference.py never run through a real interpolator. This is the
-// one testbench exercising the elastic queue described in tx_top.sv's
-// header: whether the interpolator's fast burst of INTERP outputs actually
-// survives being drained into the mixer's much slower, iterative pace
-// without a sample being dropped, duplicated, or reordered.
+// stimulus in, RF-rate IQ out. It is the only testbench that drains the
+// interpolator's burst through the elastic queue into the mixer, checking
+// that samples survive without being dropped, duplicated, or reordered.
 //
 // Run via tx/run_sim_tx_top.sh.
 

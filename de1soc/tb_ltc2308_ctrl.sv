@@ -1,37 +1,8 @@
-// Self-checking testbench for ltc2308_ctrl.
-//
-// There is no LTC2308 to test against, so this testbench *is* the ADC: an
-// SPI slave model built directly from the datasheet's Figure 9 (short
-// CONVST pulse) timing, driving SDO from a queue of programmed 12-bit codes
-// and capturing whatever SDI word the master sends. That makes this a check
-// of the *protocol*, not a comparison against silicon -- the real test is
-// deferred until a board and the part are on hand.
-//
-// The model is one always block sensitized directly to adc_convst/adc_sclk's
-// real edges (plus reset), so every signal it drives has exactly one writer
-// and its reactions are correctly ordered relative to the signal transitions
-// that cause them -- sampling those edges indirectly instead (comparing
-// against a posedge-clk-registered copy) races the DUT's own combinational
-// path from `cnt` to adc_sclk within the same clock edge, and shifted every
-// captured bit by one position during development. Verilator's `--timing`
-// (already used by every sim script here) lets the CONVST branch express
-// tCONV as a literal `repeat (N) @(posedge clk)` wait before revealing SDO,
-// so the model can hold SDO at a *wrong* value until that delay elapses --
-// which an instantaneous reaction to adc_convst could not represent.
-//
-// Checked, over many back-to-back samples:
-//   - SDO is not revealed until this model's own tCONV delay elapses, so a
-//     master that started reading early would see stale data and fail
-//   - SDI is stable a full clock *before* the edge that samples it, not
-//     merely stable *by* that edge -- the same margin the real part expects
-//   - the very first sample is discarded (nothing was configured yet when
-//     it converted -- see ltc2308_ctrl.sv's header)
-//   - every sample from the second on decodes to exactly the code this
-//     model queued for that conversion, in order
-//   - the master's own DIN word is CH0/single-ended/unipolar/no-sleep on
-//     every single transfer, not just the first
-//   - sample_valid repeats every 125 clocks (400 kS/s at 50 MHz), not some
-//     other period
+// Self-checking testbench for ltc2308_ctrl: an SPI-slave ADC model built
+// from datasheet Figure 9 timing, driving SDO from a queue of programmed
+// codes and capturing the SDI word the master sends.
+// Checks the SPI protocol -- CONVST/SCK timing, DIN setup, sample spacing,
+// and the first-sample discard -- not a comparison against real silicon.
 //
 // Run via de1soc/run_sim_ltc2308.sh.
 
@@ -83,17 +54,14 @@ module tb_ltc2308_ctrl;
 
     int fall_cnt;
 
-    // Independent of the main model below: a plain 1-cycle-delayed copy of
-    // adc_din, its own single-driver process, used only for the setup-time
-    // check where "din_shift's own value hasn't changed yet" is not enough
-    // to prove din itself was already stable.
+    // 1-cycle-delayed copy of adc_din, used only for the setup-time check
+    // below -- din_shift's own value isn't enough to prove din was stable.
     logic prev_din;
     always @(posedge clk) prev_din <= adc_din;
 
     initial begin
-        // A spread of values, not just random ones: 0 and 4095 exercise the
-        // all-zero/all-one shift patterns, which a bit-order mistake is most
-        // likely to get right by accident on a mid-range value.
+        // 0 and 4095 exercise the all-zero/all-one shift patterns; a
+        // bit-order bug is more likely to pass by accident on a mid-range value.
         codes[0]  = 12'h000;
         codes[1]  = 12'hFFF;
         codes[2]  = 12'h800;
@@ -107,11 +75,10 @@ module tb_ltc2308_ctrl;
 
     int n_fail = 0;
 
-    // The whole model, sensitized directly to the real edges it reacts to
-    // (see the header note on why not posedge clk). A new conversion holds
-    // adc_dout at whatever it last was -- the previous conversion's final
-    // bit -- until the tCONV wait below elapses, so a master that samples
-    // early gets stale data rather than a suspiciously correct answer.
+    // ADC model sensitized directly to adc_convst/adc_sclk's edges, so every
+    // driven signal has exactly one writer, correctly ordered with the
+    // transitions that cause it. adc_dout holds the previous conversion's
+    // last bit until tCONV elapses, so an early read gets stale data.
     always @(posedge adc_convst or posedge adc_sclk or negedge adc_sclk or negedge rst_n) begin
         if (!rst_n) begin
             conv_ptr  <= 0;
@@ -120,9 +87,8 @@ module tb_ltc2308_ctrl;
             din_shift <= '0;
             adc_dout  <= 1'b0;
         end else if (adc_convst) begin
-            // pending_code is the one variable here that must be blocking:
-            // it is read again immediately below, after the tCONV wait, and
-            // needs the value fixed *now* rather than deferred.
+            // pending_code must be blocking: it's re-read after the tCONV
+            // wait below, so its value must be fixed now, not deferred.
             pending_code = codes[conv_ptr];
             conv_ptr     <= conv_ptr + 1;
             rise_cnt     <= 0;
@@ -132,20 +98,12 @@ module tb_ltc2308_ctrl;
             adc_dout  <= pending_code[11];
             code_word <= pending_code[10:0];
         end else if (adc_sclk) begin
-            // Rising edge: first 6 load the configuration word; the rest
-            // are don't-care as far as this model's own behavior goes, but
-            // still counted so din_shift is not polluted by the previous
-            // transfer if code ever changed to care about it. Nonblocking
-            // here matters, not just style: the capture below needs
-            // din_shift's value from *before* this same edge's update, and
-            // a blocking `din_shift = ...` above it would already have
-            // folded this edge's bit in twice.
+            // Rising edge: first 6 pulses load the configuration word.
+            // Nonblocking din_shift matters here: the capture below needs
+            // its value from before this edge's update.
             //
-            // Setup check: adc_din must already have held this value one
-            // full clock ago (prev_din, from the standalone process above),
-            // not merely as of this edge -- adc_din changing coincident
-            // with the edge that samples it (as an earlier version of the
-            // master did) fails this.
+            // Setup check: adc_din must have held this value a full clock
+            // ago (prev_din), not merely as of this edge.
             if (adc_din !== prev_din) begin
                 n_fail++;
                 $display("FAIL setup: adc_din changed on the same edge that SCK sampled it (conversion %0d, bit %0d)",
@@ -155,12 +113,10 @@ module tb_ltc2308_ctrl;
             if (rise_cnt == 5) captured_din[conv_ptr - 1] <= {din_shift, adc_din};
             rise_cnt <= rise_cnt + 1;
         end else begin
-            // Falling edge: exposes the next bit, per Figure 9 -- B10 after
-            // the 1st fall, ..., B0 after the 11th; the 12th returns SDO to
-            // Hi-Z (modelled here as 0, since Verilator's 2-state simulation
-            // can't drive Z and the master never reads adc_dout again this
-            // period regardless). Nonblocking fall_cnt, so the case below
-            // selects on this edge's bit, not the next one's.
+            // Falling edge exposes the next bit: B10 after the 1st fall,
+            // ..., B0 after the 11th. The 12th returns SDO to Hi-Z, modelled
+            // as 0 since Verilator's 2-state sim can't drive Z and the
+            // master never reads adc_dout again this period.
             fall_cnt <= fall_cnt + 1;
             case (fall_cnt)
                 0:  adc_dout <= code_word[10];

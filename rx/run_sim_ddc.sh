@@ -18,13 +18,10 @@ python3 cordic/reference/ddc_reference.py --mix-arch fused --emit-vectors "$VEC_
 
 mkdir -p "$SIM_DIR"
 
-# VARHIDDEN, UNUSEDPARAM, and UNUSEDSIGNAL are all expected, not bugs:
-# VARHIDDEN fires because the testbench deliberately feeds ddc_params.svh's
-# localparams into the DUT's identically-named parameters (the "params come
-# from the generated header" design -- see tb_ddc_frontend.sv); UNUSEDPARAM
-# fires because ddc_params.svh carries the full DDC config, including
-# decimation fields ddc_frontend doesn't consume yet; UNUSEDSIGNAL fires
-# because the testbench waits on out_valid only, not busy.
+# VARHIDDEN/UNUSEDPARAM/UNUSEDSIGNAL are expected: the testbench feeds
+# ddc_params.svh's localparams (which carry fields ddc_frontend doesn't
+# consume) into identically-named DUT parameters, and waits on out_valid
+# only, not busy.
 verilator --binary --timing -Wall \
     -Wno-VARHIDDEN -Wno-UNUSEDPARAM -Wno-UNUSEDSIGNAL \
     --top-module tb_ddc_frontend \
