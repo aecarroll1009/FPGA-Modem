@@ -42,10 +42,11 @@ def _in_band_offset(cfg):
     the FIR's passband *and* inside the decimated Nyquist, or the tone is
     either attenuated by the filter or folded by the decimation -- and a
     folded tone looks exactly like a mirrored spectrum, which is what
-    several of these tests are trying to detect. Half the cutoff clears
-    both limits with margin at any rate, which a hardcoded frequency does
-    not: 40 kHz was comfortably in band at fs_out = 300 kHz and aliases to
-    -22.5 kHz at fs_out = 62.5 kHz.
+    several of these tests are trying to detect. Half the cutoff clears both
+    limits with margin at any rate, which a hardcoded frequency does not:
+    this project has been rescaled twice already, and each time moved
+    fs_out enough that a fixed offset picked for the old rate landed outside
+    the new decimated Nyquist.
 
     Args:
         cfg: The DDC configuration.

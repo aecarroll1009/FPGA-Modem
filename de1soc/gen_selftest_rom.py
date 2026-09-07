@@ -6,10 +6,9 @@ stimulus into rx_top and compares the result on the board, so a programmed
 FPGA reports bit-exactness against the Python model on an LED, with no host
 tooling and no analog signal path involved.
 
-That separation is the point. The ADC, its analog conditioning, and its
-anti-alias filtering are all sources of failure that have nothing to do with
-the datapath; proving the datapath on real silicon first means that when the
-ADC is added later and something is wrong, the datapath is already ruled out.
+That separation is the point: proving the datapath on real silicon first
+means the ADC and its analog front end are the only suspects once they are
+wired in (see the README's Board bring-up section).
 
 The sequence is deliberately short -- the ROM costs
 2 * N_STIM * data_bits + 2 * N_OUT * out_bits bits of M10K, and nothing is

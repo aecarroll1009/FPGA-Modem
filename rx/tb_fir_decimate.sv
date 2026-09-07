@@ -102,8 +102,10 @@ module tb_fir_decimate #(
 
         if (n_fail == 0 && n_out == N_OUT)
             $display("ALL %0d OUTPUTS PASSED", N_OUT);
-        else
+        else begin
             $display("%0d of %0d OUTPUTS FAILED (%0d produced)", n_fail, N_OUT, n_out);
+            $fatal(1, "tb_fir_decimate: %0d of %0d outputs failed (%0d produced)", n_fail, N_OUT, n_out);
+        end
 
         $finish;
     end

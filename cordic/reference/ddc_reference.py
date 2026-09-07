@@ -279,8 +279,12 @@ def firwin_lowpass(n_taps: int, cutoff_norm: float) -> np.ndarray:
     """Design a window-method lowpass FIR with unit DC gain.
 
     Uses a Blackman window, whose -74 dB sidelobes suit a 16-bit datapath.
-    Implemented directly rather than via scipy, so this module depends only
-    on numpy.
+    That figure is the window's own asymptotic bound, not a promise about
+    any specific filter built from it -- this design's actual measured
+    stopband (README's rate budget) is lower, since a 63-tap filter at a
+    real cutoff doesn't reach the sidelobe floor everywhere, and 16-bit
+    coefficient quantization costs a further margin. Implemented directly
+    rather than via scipy, so this module depends only on numpy.
 
     Args:
         n_taps: Number of taps; must be odd, for exact linear phase.
@@ -633,10 +637,11 @@ class DDCConfig:
     n_taps: int = 63
 
     # Widths are trimmed for the TinyTapeout target, where flip-flops are the
-    # scarce resource. M=24 still places any LO to 0.14 Hz; ang_bits=17 is the
-    # floor at n_iter=16 (at 16 the last atan entries round to zero); and
-    # cordic_bits=18 measures *better* than 20, since fewer guard bits means
-    # fewer LSBs truncated at the output and floor-mode error is biased.
+    # scarce resource. M=24 still places any LO to fs_in/2^24 (0.024 Hz at
+    # this config's 400 kS/s); ang_bits=17 is the floor at n_iter=16 (at 16
+    # the last atan entries round to zero); and cordic_bits=18 measures
+    # *better* than 20, since fewer guard bits means fewer LSBs truncated at
+    # the output and floor-mode error is biased.
     phase_bits: int = 24  # M: accumulator width -> frequency resolution
     phase_trunc_bits: int = 14  # N: phase bits that reach the angle path
     ang_bits: int = 17  # CORDIC internal angle width (>= N, zero-padded)
@@ -809,14 +814,10 @@ class DDC:
         q, rem = quadrant_split(self.angle_word(phase), c.ang_bits)
         x0 = np.full(rem.shape, int(round(full_scale(c.cordic_bits) / c.k_gain)), np.int64)
         y0 = np.zeros(rem.shape, np.int64)
-        # The seed is round(full_scale/K), so the K growth lands on full_scale
-        # -- one LSB above the largest representable value. At the extreme ends
-        # of the residual range (about ten of 32768 residuals) the result does
-        # therefore clip, by exactly that one LSB. The count is discarded rather
-        # than propagated because the clip is invisible downstream: shifting
-        # down to data_bits maps both full_scale and full_scale-1 to the same
-        # saturated output. Reporting it would make n_saturated fire on half of
-        # all NCO samples for a benign off-by-one.
+        # The seed rounds to one LSB above full scale, so a few extreme
+        # residuals clip by exactly that LSB -- invisible downstream, since
+        # shr() to data_bits maps full_scale and full_scale-1 to the same
+        # saturated output, so the count is discarded rather than reported.
         x, y, _, _ = cordic_rotate(x0, y0, rem, self.atan, c.cordic_bits, c.shift_mode)
         cos, sin = apply_quadrant_sincos(q, x, y)
         sh = c.cordic_bits - c.data_bits
@@ -948,8 +949,9 @@ class DDC:
 
         Down-convert only: the decimating FIR that follows the mixer is the
         RX filter. The TX chain interpolates *before* the mixer, so it is not
-        this function with a flag flipped; use mix_stage() for the TX mixer
-        until the interpolator exists.
+        this function with a flag flipped; use tx_stage() for the TX path
+        (interpolator + up-converting mixer), or mix_stage() for the mixer
+        alone.
 
         Args:
             xi: Input I samples, at data_bits.
@@ -1282,13 +1284,24 @@ def emit_vectors(ddc: DDC, out_dir: str, n: int = 4096) -> dict:
     # (interp_i/q, checks fir_interpolate.sv standalone) and post-mixer
     # (tx_mix_i/q, checks tx_top end to end) outputs, from one call to
     # tx_stage() so the two stages cannot desync from each other.
+    #
+    # The two tone offsets must stay inside the baseband Nyquist (fs_out/2)
+    # to mean anything as a TX exercise -- a tone beyond it aliases against
+    # itself in this complex baseband, which a rescale can silently produce:
+    # 40/-25 kHz were fine when fs_out was 300 kHz, but fs_out is now 50 kHz
+    # (Nyquist 25 kHz), putting -25 kHz exactly *at* Nyquist and 40 kHz past
+    # it entirely.
     n_tx = 512
     tx_i = tx_q = None
     if c.mix_arch == MIX_FUSED:
+        assert 15_000.0 < c.fs_out / 2.0 and 8_000.0 < c.fs_out / 2.0, (
+            f"TX stimulus tones no longer fit inside the {c.fs_out / 2.0:g} Hz "
+            f"baseband Nyquist -- pick new offsets"
+        )
         t = np.arange(n_tx)
         a = full_scale(c.data_bits) * (10.0 ** (-6.0 / 20.0)) / 2.0
-        z = a * np.exp(1j * 2 * np.pi * 40_000.0 / c.fs_out * t) + \
-            a * np.exp(1j * 2 * np.pi * -25_000.0 / c.fs_out * t + 0.7j)
+        z = a * np.exp(1j * 2 * np.pi * 15_000.0 / c.fs_out * t) + \
+            a * np.exp(1j * 2 * np.pi * -8_000.0 / c.fs_out * t + 0.7j)
         tx_i = sat(np.round(z.real).astype(np.int64), c.data_bits)
         tx_q = sat(np.round(z.imag).astype(np.int64), c.data_bits)
         tx = ddc.tx_stage(tx_i, tx_q)
@@ -1585,7 +1598,8 @@ def _run_emit_vectors(cfg: DDCConfig, out_dir: str, n: int) -> None:
     d = man["derived"]
     print(f"\nwrote {len(man['files'])} files to {out_dir}")
     print(f"  {d['n_input_samples']} input samples -> {d['n_output_samples']} output samples")
-    print(f"  phase_inc = 0x{d['phase_inc']:08x}, K = {d['k_gain']:.10f}")
+    hex_digits = (cfg.phase_bits + 3) // 4
+    print(f"  phase_inc = 0x{d['phase_inc']:0{hex_digits}x}, K = {d['k_gain']:.10f}")
 
 
 def main(argv=None) -> int:

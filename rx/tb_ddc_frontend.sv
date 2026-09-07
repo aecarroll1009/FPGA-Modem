@@ -158,8 +158,10 @@ module tb_ddc_frontend #(
 
         if (n_fail == 0)
             $display("ALL %0d SAMPLES PASSED", 3 * N_STIM);
-        else
+        else begin
             $display("%0d of %0d SAMPLES FAILED", n_fail, 3 * N_STIM);
+            $fatal(1, "tb_ddc_frontend: %0d of %0d samples failed", n_fail, 3 * N_STIM);
+        end
 
         $finish;
     end

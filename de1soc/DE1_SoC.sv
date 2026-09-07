@@ -1,15 +1,13 @@
 // DE1-SoC board top level: the RX chain, self-testing against the reference
 // model on real silicon.
 //
-// This is the first bring-up stage, and it deliberately contains no ADC. The
-// datapath, the analog front end, and the converter interface are three
-// independent sources of failure; wiring them up together means a wrong
-// answer has three suspects. Here the stimulus comes from an on-chip ROM and
-// the expected response comes from the same reference model the simulation
-// testbenches use, so a programmed board answers exactly one question: does
-// the synthesized datapath produce, on hardware, the bits the model says it
-// should? When the LTC2308 controller lands, the datapath is already ruled
-// out.
+// This is the first bring-up stage, and it deliberately contains no ADC --
+// see the README's Board bring-up section for why. Stimulus comes from an
+// on-chip ROM and the expected response from the same reference model the
+// simulation testbenches use, so a programmed board answers exactly one
+// question: does the synthesized datapath produce, on hardware, the bits
+// the model says it should? de1soc/ltc2308_ctrl.sv is verified standalone
+// but not yet wired in here.
 //
 // -- what it does ---------------------------------------------------------
 // Plays SELFTEST_N_STIM samples into rx_top as fast as it will take them

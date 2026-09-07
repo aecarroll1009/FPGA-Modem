@@ -3,11 +3,12 @@
 # Run from the repo root via syn/run_syn.ps1, or directly:
 #   quartus_sh -t syn/build.tcl [top] [device]
 #
-# Three tops are buildable and they answer different questions. rx_top is the
+# Four tops are buildable and they answer different questions. rx_top is the
 # FPGA RX chain. tx_top is the FPGA TX chain. tt_um_cordic_ddc is the unit
 # that tapes out, where the mixing direction is a live pin rather than a
 # constant -- so it is the build that actually pays for the runtime
-# direction rather than folding it away.
+# direction rather than folding it away. DE1_SoC is the pinned-out board
+# build; see the pinned/RESERVE_ALL_UNUSED_PINS handling below.
 #
 # Everything it writes lands in syn/output/, which is gitignored -- the project
 # is generated from this script rather than checked in, so the file list and
@@ -59,8 +60,8 @@ set_global_assignment -name DEVICE $device
 set_global_assignment -name TOP_LEVEL_ENTITY $top
 
 # cordic_core.sv includes cordic_atan_table.svh, fir_decimate.sv includes
-# fir_coef_table.svh, and DE1_SoC.sv includes selftest_rom.svh, all by bare
-# name.
+# fir_coef_table.svh, fir_interpolate.sv includes fir_interp_coef_table.svh,
+# and DE1_SoC.sv includes selftest_rom.svh, all by bare name.
 set_global_assignment -name SEARCH_PATH [file join $root cordic]
 set_global_assignment -name SEARCH_PATH [file join $root rx]
 set_global_assignment -name SEARCH_PATH [file join $root de1soc]
@@ -81,8 +82,9 @@ if {[lsearch -exact $pinned $top] >= 0} {
     set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
 }
 
-# Report a violation rather than silently inferring a latch or a soft
-# multiplier where the design did not ask for one.
+# Let synthesis optimize toward the SDC's actual timing targets rather than
+# a generic area/speed tradeoff -- the Fmax numbers this flow reports are
+# only meaningful if synthesis was aiming at the constraint being measured.
 set_global_assignment -name SYNTH_TIMING_DRIVEN_SYNTHESIS ON
 
 project_close

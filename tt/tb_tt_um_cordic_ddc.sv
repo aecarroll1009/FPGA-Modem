@@ -188,8 +188,10 @@ module tb_tt_um_cordic_ddc #(
                  (N_TEST + 1) / 2, N_TEST / 2);
         if (n_fail == 0)
             $display("ALL %0d SERIALISED SAMPLES PASSED", N_TEST);
-        else
+        else begin
             $display("%0d of %0d SERIALISED SAMPLES FAILED", n_fail, N_TEST);
+            $fatal(1, "tb_tt_um_cordic_ddc: %0d of %0d samples failed", n_fail, N_TEST);
+        end
 
         $finish;
     end

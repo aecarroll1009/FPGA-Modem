@@ -94,8 +94,10 @@ module tb_fir_interpolate;
 
         if (n_fail == 0 && n_out == N_INTERP_OUT)
             $display("ALL %0d OUTPUTS PASSED", N_INTERP_OUT);
-        else
+        else begin
             $display("%0d of %0d OUTPUTS FAILED (%0d produced)", n_fail, N_INTERP_OUT, n_out);
+            $fatal(1, "tb_fir_interpolate: %0d of %0d outputs failed (%0d produced)", n_fail, N_INTERP_OUT, n_out);
+        end
 
         $finish;
     end

@@ -34,9 +34,12 @@
 // int64 accumulation -- and is saturated to ACC_BITS only once, at the end,
 // not per MAC step. The output shift is a floor (arithmetic) shift by
 // COEF_BITS-1, then a second saturation to OUT_BITS. Neither saturation
-// fires at the default widths (the true worst case is about 2^38, inside 40
-// bits); they exist so a future width change fails loudly in simulation
-// instead of wrapping silently.
+// fires at the default widths: summing |coefficient| x 2 (each non-centre
+// tap is folded, so it scales two input samples) x full-scale input, over
+// the actual coefficient table, bounds the worst case at about 2^30.6 --
+// comfortably inside the 40-bit accumulator, with ~9 bits to spare for a
+// future coefficient or width change. The saturation exists so such a
+// change fails loudly in simulation instead of wrapping silently.
 //
 // Reference model: cordic/reference/ddc_reference.py, fir_decimate().
 
@@ -157,14 +160,11 @@ module fir_decimate #(
 
     // -- MAC engine ----------------------------------------------------------
     // Two-stage pipeline, address-generate then multiply-accumulate, so the
-    // delay line's reads are registered rather than combinational. That is
-    // the difference between Quartus mapping ram_i_a/b and ram_q_a/b onto
-    // M10K block RAM and it building them out of plain flip-flops with a
-    // 128:1 mux in front: the first synthesis pass here (combinational reads)
-    // came back at 0 block memory bits, 4630 ALMs, and Fmax nearly halved --
-    // the mux was the new critical path. One pipeline stage costs one extra
-    // cycle per MAC step, which the 152-clock decimation budget does not
-    // notice.
+    // delay line's reads are registered rather than combinational -- required
+    // for Quartus to map ram_i_a/b and ram_q_a/b onto M10K block RAM instead
+    // of flip-flops with a wide mux (see the README's synthesis section for
+    // the numbers). The extra pipeline cycle per MAC step is free against the
+    // 152-clock decimation budget.
     typedef enum logic [1:0] {IDLE, RUN, FINISH} mac_state_t;
     mac_state_t mac_state;
 

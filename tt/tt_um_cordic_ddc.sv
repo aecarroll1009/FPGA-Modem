@@ -2,10 +2,10 @@
 // interface that fits TinyTapeout's 8 in / 8 out / 8 bidirectional pins.
 //
 // The parallel core needs 65 input and 36 output bits, so it cannot be pinned
-// out directly. It does not have to be: the iterative CORDIC spends 19 clocks
-// per sample, and the byte traffic is 4 bytes in and 5 bytes out, which shift
-// concurrently on separate ports. So serialisation hides entirely inside the
-// rotation and costs no throughput -- the CORDIC stays the bottleneck.
+// out directly. The iterative CORDIC spends 19 clocks per sample, and the
+// byte traffic (4 bytes in, 5 out) mostly hides inside that by shifting
+// concurrently on separate ports -- measured cost is 22 clocks/sample, ~16%
+// over the core's own 19, not free but far short of a fully serial cost.
 //
 // The decimating FIR is deliberately NOT here. Its 63-deep sample delay line
 // alone is over a thousand flip-flops, larger than this whole design; it stays
@@ -95,12 +95,10 @@ module tt_um_cordic_ddc #(
     wire                   ddc_out_valid;
 
     // Accept a sample byte whenever the core can take the rotation it will
-    // start. Deliberately NOT gated on out_active: input arrives on ui_in and
-    // results leave on uo_out, so a host can shift the next sample in while
-    // the current result shifts out. That is safe because results are muxed
-    // from mix_i/mix_q, which hold until the next rotation completes 19 clocks
-    // later -- far longer than the 5 clocks needed to read them out. Gating on
-    // out_active as well would serialise the two and cost ~5 clocks a sample.
+    // start -- deliberately not also gated on out_active, since mix_i/mix_q
+    // hold for 19 clocks (far longer than the 5 needed to read them out on
+    // uo_out), so input and output safely overlap. Gating on both would
+    // serialise them and cost ~5 clocks/sample (see the README's I/O table).
     logic                  out_active;
     wire                   i_ready = !ddc_busy;
     wire                   take    = i_valid && (i_cfg || i_ready);

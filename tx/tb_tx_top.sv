@@ -112,8 +112,10 @@ module tb_tx_top;
 
         if (n_fail == 0 && n_out == N_INTERP_OUT)
             $display("ALL %0d TX END-TO-END OUTPUTS PASSED", N_INTERP_OUT);
-        else
+        else begin
             $display("%0d of %0d TX END-TO-END OUTPUTS FAILED (%0d produced)", n_fail, N_INTERP_OUT, n_out);
+            $fatal(1, "tb_tx_top: %0d of %0d outputs failed (%0d produced)", n_fail, N_INTERP_OUT, n_out);
+        end
 
         $finish;
     end

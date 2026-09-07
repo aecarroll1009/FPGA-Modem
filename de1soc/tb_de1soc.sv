@@ -97,8 +97,10 @@ module tb_de1soc;
         if (n_fail == 0)
             $display("DE1_SoC SELF TEST PASSED (pass LED lit, %0d/%0d outputs, 0 mismatches)",
                      dut.n_recv, `SELFTEST_N_OUT);
-        else
+        else begin
             $display("%0d CHECKS FAILED", n_fail);
+            $fatal(1, "tb_de1soc: %0d check(s) failed", n_fail);
+        end
 
         $finish;
     end
@@ -156,9 +158,11 @@ module tb_de1soc_negative;
         if (LEDR[0] && LEDR[2] && !LEDR[1] && dut.n_bad != 8'd0)
             $display("NEGATIVE CHECK PASSED (%0d mismatch reported, pass LED dark)",
                      dut.n_bad);
-        else
+        else begin
             $display("NEGATIVE CHECK FAILED: done=%0b pass=%0b fail=%0b n_bad=%0d -- a corrupted expectation was not detected",
                      LEDR[0], LEDR[1], LEDR[2], dut.n_bad);
+            $fatal(1, "tb_de1soc_negative: corrupted expectation was not detected");
+        end
         $finish;
     end
 

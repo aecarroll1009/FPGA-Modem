@@ -117,8 +117,10 @@ module tb_rx_top;
 
         if (n_fail == 0 && n_out == N_OUT)
             $display("ALL %0d END-TO-END OUTPUTS PASSED", N_OUT);
-        else
+        else begin
             $display("%0d of %0d END-TO-END OUTPUTS FAILED (%0d produced)", n_fail, N_OUT, n_out);
+            $fatal(1, "tb_rx_top: %0d of %0d outputs failed (%0d produced)", n_fail, N_OUT, n_out);
+        end
 
         $finish;
     end

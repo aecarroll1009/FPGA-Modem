@@ -15,7 +15,14 @@ mkdir -p "$SIM_DIR"
 
 SRC="de1soc/ltc2308_ctrl.sv de1soc/tb_ltc2308_ctrl.sv"
 
+# BLKSEQ: the ADC model's always block uses blocking assignments for its
+# bookkeeping variables (conv_ptr, rise_cnt, ...) deliberately, so that
+# pending_code is fixed *before* the procedural `repeat (...) @(posedge
+# clk)` tCONV wait -- a nonblocking assignment there would still show the
+# old value across that wait. adc_dout stays nonblocking throughout, so
+# every signal still has exactly one assignment style.
 verilator --binary --timing -Wall \
+    -Wno-BLKSEQ \
     --top-module tb_ltc2308_ctrl \
     -Ide1soc \
     $SRC \

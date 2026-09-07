@@ -89,8 +89,10 @@ module tb_cordic_core #(
 
         if (n_fail == 0)
             $display("ALL %0d VECTORS PASSED", NUM_VECTORS);
-        else
+        else begin
             $display("%0d of %0d VECTORS FAILED", n_fail, NUM_VECTORS);
+            $fatal(1, "tb_cordic_core: %0d of %0d vectors failed", n_fail, NUM_VECTORS);
+        end
 
         $finish;
     end

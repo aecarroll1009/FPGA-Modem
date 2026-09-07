@@ -15,20 +15,10 @@
 // pulses. The MSB (B11) is already valid before the first pulse -- read
 // directly, no clock needed -- and each pulse's *falling* edge exposes the
 // next bit (B10 down to B0), 11 more bits from 11 of the 12 pulses; the
-// 12th pulse's fall returns the bus to Hi-Z and carries no new bit.
-//
-// Each bit is captured one full clock *after* the pulse whose falling edge
-// exposed it, not on that same edge. This master's capture logic decides
-// what to do at a given clock edge from `cnt`'s *pre*-edge value, i.e. the
-// state that was true for the whole 20ns period ending at that edge -- and
-// pulse p's falling transition happens at the *start* of that period, one
-// clock earlier. tdDO (SDO's delay after SCK falls) is at most 12.5ns, so
-// by the time this master's next relevant edge arrives 20ns later, the new
-// bit has long since settled at the input pin; capturing then, rather than
-// on the transition's own edge, is what gives it a full clock of margin
-// against tdDO instead of racing it. Pulse p's low half therefore yields
-// B(10-p) for p=0..10; p=11's low half is the bus going Hi-Z and is not
-// captured.
+// 12th pulse's fall returns the bus to Hi-Z and carries no new bit. Each
+// bit is captured one full clock after the falling edge that exposes it
+// (not on that same edge), which is what turns tdDO's up-to-12.5ns
+// propagation delay into a full 20ns of margin instead of a race.
 //
 // The same 12 SCK pulses also load a 6-bit configuration word (S/D, O/S,
 // S1, S0, UNI, SLP) on their first 6 *rising* edges, which is what the
@@ -39,6 +29,11 @@
 // onward every code is CH0/unipolar; only the very first code after reset
 // was converted before any configuration word was ever sent and must be
 // discarded -- sample_valid stays low for it.
+//
+// DIN changes a full clock *before* the SCK rising edge that samples it
+// (during the low half preceding each pulse, not the high half coincident
+// with it), the mirror image of the SDO timing above: the ADC needs SDI
+// set up ahead of the edge it latches on, not merely stable by that edge.
 //
 // Unipolar mode requires COM biased to REFCOMP/2 (datasheet Figure 2), and
 // the DE1-SoC's 2x5 header brings out only VCC5/ADC_IN0-7/GND -- COM is
@@ -71,15 +66,23 @@ module ltc2308_ctrl (
     // -- cycle budget, all in 20ns (50 MHz) clocks --------------------------
     localparam int Period     = 125;  // 50e6 / 400e3: the sample period
     localparam int ConvstHigh = 2;    // 40ns >= tWHCONV (20ns min)
-    localparam int ShiftBegin = 80;   // 1.6us: tCONV's guaranteed maximum
+    // cnt reaches ShiftBegin after 81 clocks (1.62us) since CONVST rose, not
+    // 80 (1.6us) -- cnt is 0 for the first clock, so the Nth value is reached
+    // on the (N+1)th edge. 1.62us still clears tCONV's guaranteed maximum of
+    // 1.6us, with 20ns to spare.
+    localparam int ShiftBegin = 80;
     localparam int NPulses    = 12;
     localparam int ShiftEnd   = ShiftBegin + 1 + 2 * NPulses - 1;  // 104
     localparam int EmitCycle  = ShiftEnd + 1;                      // 105
 
-    // Cycles [EmitCycle+1, Period-1] (105..124, 400ns) are deliberately idle:
+    // Cycles [EmitCycle+1, Period-1] (106..124, 380ns) are deliberately idle:
     // margin for tHCONVST (>=20ns after the last SCK fall) and tWLCONVST
     // (>=410ns CONVST-low during the transfer), both cleared by a wide
-    // margin rather than to the datasheet minimum.
+    // margin rather than to the datasheet minimum. tACQ (>=240ns, measured
+    // from the 7th SCK rising edge to the *next* CONVST rise) spans this
+    // idle window too: pulse 7's rising edge is at cnt=93, the next CONVST
+    // rise is at cnt=Period(125 -> wraps to 0), a 640ns gap -- 2.7x tACQ's
+    // minimum.
     localparam int CntBits = $clog2(Period);
     logic [CntBits-1:0] cnt;
 
@@ -96,8 +99,19 @@ module ltc2308_ctrl (
 
     assign adc_convst = (cnt < CntBits'(ConvstHigh));
     assign adc_sclk   = in_shift && !pulse_half;
-    assign adc_din    = (in_shift && !pulse_half && pulse_idx < 4'd6)
-                       ? DinWord[5 - pulse_idx] : 1'b0;
+
+    // DIN bit k (k=0..5) is presented starting at cnt=ShiftBegin+2k -- one
+    // full clock before pulse k's own rising edge at ShiftBegin+2k+1 -- and
+    // held through that rising-edge cycle, giving the ADC a full 20ns of
+    // setup rather than changing SDI on the very edge that samples it.
+    logic [CntBits-1:0] din_offset;
+    logic [2:0]         din_idx;
+    logic               din_in_range;
+
+    assign din_in_range = (cnt >= CntBits'(ShiftBegin)) && (cnt <= CntBits'(ShiftBegin + 2 * 6 - 1));
+    assign din_offset   = cnt - CntBits'(ShiftBegin);
+    assign din_idx      = 3'(din_offset >> 1);
+    assign adc_din      = din_in_range ? DinWord[5 - din_idx] : 1'b0;
 
     logic [11:0] code_reg;
     logic        first_done;

@@ -25,10 +25,11 @@ handed off to GNU Radio for the actual demod/mod work.
 ![RX/TX CORDIC datapath](docs/ddc_duc_datapath.svg)
 
 **Status.** The full RX and TX datapaths exist in RTL and are verified bit-exact against a
-numpy reference model, along with a pinned-out, self-testing DE1-SoC board top. Nothing has
-run on hardware — there is no board on hand — and the LTC2308 controller, the analog front
-end and a TX output device are all still missing. *Board bring-up* below says which of
-those gaps blocks what.
+numpy reference model, along with a pinned-out, self-testing DE1-SoC board top and a
+datasheet-verified LTC2308 SPI master. Nothing has run on hardware — there is no board on
+hand — the controller is not yet wired into a board top, and the analog front end and a TX
+output device are still missing entirely. *Board bring-up* below says which of those gaps
+blocks what.
 
 ## Components
 
@@ -232,34 +233,27 @@ let alone programmed — and nothing here is claimed as a hardware result.
 
 `de1soc/ltc2308_ctrl.sv` is the SPI master, built directly from the datasheet (Figure 9,
 "short CONVST pulse"): CONVST pulses for 2 clocks (40 ns, against a 20 ns minimum), waits
-80 clocks (1.6 µs — the datasheet's *guaranteed maximum* conversion time, not the 1.3 µs
-typical the 500 kS/s ceiling assumes), reads the already-valid MSB, then drives 12 SCK
-pulses that shift out the remaining 11 bits while loading the next conversion's 6-bit mode
-word (channel 0, single-ended, unipolar, no sleep). One 125-clock period is 2.5 µs, i.e.
-400 kS/s. Every datasheet timing constraint (`tWHCONV`, `tCONV`, `tACQ`, `tHCONVST`,
-`tWLCONVST`) closes against its own guaranteed maximum, not a typical value, with margins
-ranging from 2× to 19×; the full derivation is in the module's header comment.
+until `cnt` reaches 80 — 81 clocks (1.62 µs) after CONVST rose, since `cnt` starts at 0 on
+the first clock — before reading the already-valid MSB, then drives 12 SCK pulses that
+shift out the remaining 11 bits while loading the next conversion's 6-bit mode word
+(channel 0, single-ended, unipolar, no sleep). One 125-clock period is 2.5 µs, i.e. 400
+kS/s. Every datasheet timing constraint closes against its own guaranteed maximum, not a
+typical value, but not with uniform margin — tCONV (1.6 µs guaranteed max) clears by only
+20 ns, the tightest constraint in the design, while tACQ clears by 2.7×, tWLCONVST by 6×,
+and tHCONVST by over 20×; the full derivation is in the module's comments.
 
 Because "between conversions... data from the previous conversion is shifted out on SDO"
 (the datasheet's own words), the code returned during any given transfer was actually
 configured by the *previous* transfer's mode word — so the very first code after reset was
 converted before this master ever sent a mode word at all, and is discarded rather than
 trusted. `de1soc/tb_ltc2308_ctrl.sv` models the ADC's SPI slave side from the same timing
-diagram and checks, over 23 back-to-back samples: the first is correctly discarded, every
-later one decodes bit-exact to what the model queued for it, the mode word is right on
-every single transfer (not just the first), and samples land exactly 125 clocks apart. Run
-via `./de1soc/run_sim_ltc2308.sh`.
-
-One bug this testbench caught before it ever reached a board: bits captured off a falling
-SCK edge need to be sampled one clock *later* than the edge that exposes them, not on that
-same edge — the controller's own registered decode of "which pulse are we in" only reflects
-that pulse's state for the clock period *after* its causing transition, and the first
-version of this design captured on the wrong cycle, silently sampling B(9-p) into the slot
-meant for B(10-p) for every bit except the MSB. All 12 bits landing right except a
-consistent one-position defect is exactly the signature a real hardware bring-up session
-would have had to debug blind, on an oscilloscope, with the datapath as a second suspect
-alongside the SPI framing — instead it showed up as a bit-exact mismatch against a
-datasheet-derived model, in simulation, with no board required.
+diagram, holding SDO at a stale value until its own tCONV delay elapses (so a wait shortened
+back to the 1.3 µs typical would be caught) and checking SDI's value a full clock before the
+edge that samples it, not merely as of that edge (so a setup violation is caught, not just a
+value mismatch). Over 23 back-to-back samples it checks: the first is correctly discarded,
+every later one decodes bit-exact to what the model queued for it, the mode word is right on
+every single transfer, SDI setup holds on every bit, and samples land exactly 125 clocks
+apart. Run via `./de1soc/run_sim_ltc2308.sh`.
 
 **Not yet wired into a board top.** The controller is verified against a protocol model,
 not against silicon, and it is not yet instantiated in `DE1_SoC.sv` — that top still plays
