@@ -103,5 +103,13 @@ if {[catch {execute_module -tool sta} err]} {
     exit 1
 }
 
+if {[lsearch -exact $pinned $top] >= 0} {
+    if {[catch {execute_module -tool asm} err]} {
+        puts "ASSEMBLER FAILED: $err"
+        project_close
+        exit 1
+    }
+}
+
 project_close
 puts "BUILD OK top=$top device=$device"

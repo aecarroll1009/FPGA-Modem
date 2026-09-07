@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install verilator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y verilator
+          verilator --version
+
+      - name: Install numpy
+        run: pip install numpy
+
+      - name: Reference model unit tests
+        run: python3 cordic/reference/test_ddc_reference.py
+
+      - name: CORDIC core
+        run: bash cordic/run_sim.sh
+
+      - name: DDC front end (both mixing directions)
+        run: bash rx/run_sim_ddc.sh
+
+      - name: Decimating FIR
+        run: bash rx/run_sim_fir.sh
+
+      - name: Interpolating FIR
+        run: bash rx/run_sim_fir_interp.sh
+
+      - name: RX top (mixer + decimator, end to end)
+        run: bash rx/run_sim_rx_top.sh
+
+      - name: TX top (interpolator + mixer, end to end)
+        run: bash tx/run_sim_tx_top.sh
+
+      - name: TinyTapeout wrapper (byte-serial interface)
+        run: bash tt/run_sim_tt.sh
+
+      - name: DE1-SoC board top (positive and negative)
+        run: bash de1soc/run_sim_de1soc.sh
+
+      - name: LTC2308 SPI master
+        run: bash de1soc/run_sim_ltc2308.sh
+
+      - name: Sustained throughput measurement
+        run: bash rx/run_throughput.sh
