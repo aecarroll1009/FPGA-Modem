@@ -882,7 +882,7 @@ def test_fixed_point_tracks_the_ideal_model():
     The NCO threshold is deliberately not the ~90 dB an LO like fs/4 or fs/8
     scores. Those divide the phase accumulator exactly (phase_trunc_residue
     == 0), exercising no phase truncation at all, and the default LO no
-    longer does: at 100 kHz on a 500 kS/s clock the residue is non-zero, so
+    longer does: at 80 kHz on a 400 kS/s clock the residue is non-zero, so
     truncation spurs set the floor and the honest number is ~74 dB. That is
     the same hardware measured at a representative LO, not a regression --
     see test_phase_truncation_only_bites_when_the_fcw_exercises_it, which
@@ -1240,12 +1240,10 @@ def test_clipping_inside_the_rotation_is_counted():
 def test_quantization_that_breaks_linear_phase_is_rejected():
     """firwin_lowpass builds exact symmetry; the residue fixup can destroy it.
 
-    The breaking width is searched for rather than hardcoded. Which
+    The breaking width is searched for rather than hardcoded, since which
     coef_bits first moves the rounding residue off the centre tap depends on
-    the filter's shape, so it moves whenever fir_cutoff does -- at the old
-    100 kHz/1.2 MHz cutoff 10 bits broke symmetry; at the current 25 kHz it
-    takes 8. A fixed number silently stops testing anything the moment the
-    filter is retuned.
+    the filter's shape and moves whenever fir_cutoff does. A fixed number
+    would silently stop testing anything the moment the filter is retuned.
     """
     cfg = DDCConfig()
     h = G.firwin_lowpass(cfg.n_taps, cfg.fir_cutoff / (cfg.fs_in / 2))

@@ -77,7 +77,7 @@ module tb_throughput #(
         cps = real'(last_cyc - first_cyc) / real'(n_out - 1);
         $display("outputs=%0d over %0d clocks", n_out, last_cyc - first_cyc);
         $display("sustained: %0.2f clocks per sample", cps);
-        $display("=> 0.5 MS/s needs a %0.2f MHz clock (mixer alone)", 0.5 * cps);
+        $display("=> 0.4 MS/s needs a %0.2f MHz clock (mixer alone)", 0.4 * cps);
         $display("=> FIR budget at DECIM=%0d: %0.0f clocks per I/Q output pair",
                  DECIM, cps * DECIM);
         $finish;

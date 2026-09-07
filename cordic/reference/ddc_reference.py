@@ -606,28 +606,30 @@ def _validate_cordic_iterations(cfg: "DDCConfig") -> None:
 class DDCConfig:
     """Every value the RTL needs, as a frozen dataclass.
 
-    Defaults target the DE1-SoC's on-board LTC2308 ADC: a 500 kS/s capture
-    at a 100 kHz carrier, decimated by 8 to a 62.5 kS/s complex baseband
-    with a 25 kHz passband.
+    Defaults target the DE1-SoC's on-board LTC2308 ADC: a 400 kS/s capture
+    at an 80 kHz carrier, decimated by 8 to a 50 kS/s complex baseband with
+    a 20 kHz passband.
 
-    The rate is the converter's, not a choice: 500 kS/s is the LTC2308's
-    ceiling, and nothing else on that board samples faster (the WM8731
-    codec tops out at 96 kHz). fir_cutoff then has to clear the decimated
-    Nyquist of fs_in/(2*decim) = 31.25 kHz, which _validate_no_aliasing()
-    enforces -- the previous 100 kHz cutoff is rejected outright at this
-    rate.
+    The rate is the converter's, not a choice, but it is not the LTC2308's
+    500 kS/s ceiling either: closing the LTC2308's own conversion timing
+    against its *datasheet maximum* -- tCONV up to 1.6us, not the 1.3us
+    typical -- needs a 2.5us sample period, i.e. 400 kS/s, on a 50 MHz
+    SCK-generating clock. 500 kS/s only closes if the part performs at its
+    typical timing, which is a real part in a fixed corner, not a margin.
+    fir_cutoff then has to clear the decimated Nyquist of
+    fs_in/(2*decim) = 25 kHz, which _validate_no_aliasing() enforces.
 
-    f_lo is deliberately not a binary fraction of fs_in. At 125 kHz
+    f_lo is deliberately not a binary fraction of fs_in. At 100 kHz
     (fs_in/4) the phase accumulator would divide exactly, exercising no
-    phase truncation at all and flattering every spur measurement; 100 kHz
-    leaves a truncation residue, so the reported SFDR is the one the
-    hardware will actually show.
+    phase truncation at all and flattering every spur measurement; 80 kHz
+    (fs_in/5) leaves a truncation residue, so the reported SFDR is the one
+    the hardware will actually show.
     """
 
-    fs_in: float = 500_000.0
-    f_lo: float = 100_000.0
+    fs_in: float = 400_000.0
+    f_lo: float = 80_000.0
     decim: int = 8
-    fir_cutoff: float = 25_000.0
+    fir_cutoff: float = 20_000.0
     n_taps: int = 63
 
     # Widths are trimmed for the TinyTapeout target, where flip-flops are the
@@ -1173,10 +1175,9 @@ def two_tone(n: int, cfg: DDCConfig, offsets=(5_000.0, -12_000.0), amp_dbfs=-6.0
     measured on this stimulus meaningful: a tone beyond fir_cutoff is
     attenuated *by design*, and scoring the output against an ideal model
     that also filters it measures mostly filtered-out noise. The offsets are
-    therefore tied to fir_cutoff, not fixed -- at the 25 kHz cutoff these
-    defaults leave comfortable margin, while the previous 25/60 kHz pair
-    (chosen for a 100 kHz passband) would now sit outside it and understate
-    SNR by more than 10 dB.
+    fixed rather than tied to fir_cutoff -- 5/12 kHz clears the current
+    20 kHz cutoff with comfortable margin, but a future rescale that shrinks
+    the passband below 12 kHz would need these revisited.
 
     Args:
         n: Number of samples.
@@ -1465,8 +1466,13 @@ def _measure_ddc_quality(ddc: DDC, cfg: DDCConfig, n: int) -> dict:
     fixed = (r["out_i"] + 1j * r["out_q"]).astype(complex) / scale
 
     # SFDR needs a single tone, measured separately at an offset away from
-    # DC and the band edge.
-    si, sq = tone(n, cfg.fs_in, cfg.f_lo_actual + 37_000.0, -6.0, cfg.data_bits)
+    # DC and the band edge. The offset is derived from fir_cutoff rather
+    # than fixed: a hardcoded 37 kHz was comfortably inside the passband at
+    # an earlier, wider config, but at fir_cutoff=20 kHz (decimated Nyquist
+    # 25 kHz) it aliased back into the measured band, and the measurement
+    # collapsed from ~58 dB to ~8 dB -- not a datapath regression, just a
+    # tone that had quietly stopped being in-band.
+    si, sq = tone(n, cfg.fs_in, cfg.f_lo_actual + cfg.fir_cutoff / 2.0, -6.0, cfg.data_bits)
     rs = ddc.run(si, sq)
     single = (rs["out_i"] + 1j * rs["out_q"]).astype(complex) / scale
 
