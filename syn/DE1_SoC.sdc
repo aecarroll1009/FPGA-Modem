@@ -45,9 +45,8 @@ set_input_delay -clock adc_sclk -clock_fall \
 set_false_path -to [get_ports ADC_CONVST]
 
 # -- IQ egress --------------------------------------------------------------
-# A UART receiver recovers bit timing from the start edge, so there is no
-# relationship to constrain. The divisor is exact: 50 MHz / 20 = 2.5 Mbaud.
-set_false_path -to [get_ports UART_TX]
+# The FIFO the HPS drains sits inside soc_system's clock domain; the HPS and
+# its bridge bring their own constraints in through soc_system.qip.
 
 # -- user I/O ---------------------------------------------------------------
 # KEY[0] is the reset: debounced on the board, asynchronous by nature.

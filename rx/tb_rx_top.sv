@@ -41,6 +41,8 @@ module tb_rx_top;
         .in_ready     (in_ready),
         .adc_i        (adc_i),
         .adc_q        (adc_q),
+        // Decimated egress: the vectors are FIR outputs.
+        .tap_full     (1'b0),
         .out_valid    (out_valid),
         .out_ready    (out_ready),
         .iq_i         (iq_i),

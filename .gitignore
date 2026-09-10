@@ -19,3 +19,7 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# HPS streamer binaries
+hps/iq_streamd
+hps/iq_streamd_fake

@@ -20,8 +20,8 @@ mkdir -p "$SIM_DIR"
 SRC="cordic/cordic_core.sv cordic/nco.sv cordic/mixer_fused.sv
      rx/ddc_frontend.sv rx/fir_decimate.sv rx/rx_top.sv
      de1soc/hex7seg.sv de1soc/ltc2308_ctrl.sv de1soc/ltc2308_model.sv
-     de1soc/uart_tx.sv de1soc/byte_fifo.sv de1soc/iq_framer.sv
-     de1soc/DE1_SoC.sv de1soc/tb_de1soc.sv"
+     de1soc/iq_avalon_fifo.sv
+     de1soc/de1soc_core.sv de1soc/tb_de1soc.sv"
 
 # UNUSEDSIGNAL: spare SWs and KEYs are collected into _unused_ok.
 # DECLFILENAME: tb_de1soc.sv holds all three board testbenches.

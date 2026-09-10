@@ -52,14 +52,17 @@ jobs:
       - name: LTC2308 SPI master
         run: bash de1soc/run_sim_ltc2308.sh
 
-      - name: UART, byte FIFO, and IQ framer
-        run: bash de1soc/run_sim_uart.sh
+      - name: IQ FIFO over Avalon
+        run: bash de1soc/run_sim_egress.sh
 
       - name: DE1-SoC board top (self-test, negative, and live ADC)
         run: bash de1soc/run_sim_de1soc.sh
 
-      - name: Host IQ decoder
-        run: python3 host/capture_iq.py --self-check
+      - name: Host UDP receiver
+        run: python3 host/iq_udp.py --self-check
+
+      - name: HPS streamer against a software model of the slave
+        run: bash hps/run_check.sh
 
       - name: Sustained throughput measurement
         run: bash rx/run_throughput.sh

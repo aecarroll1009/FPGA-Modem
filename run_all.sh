@@ -4,7 +4,8 @@
 #   ./run_all.sh              everything but the BER sweep (about a minute)
 #   ./run_all.sh --with-ber   plus the QPSK BER sweep (several minutes)
 #
-# Needs verilator, python3, numpy. Synthesis is separate, see syn/run_syn.ps1.
+# Needs verilator, python3, numpy, and a C compiler. Synthesis is separate,
+# see syn/run_syn.ps1.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -31,9 +32,10 @@ step "RX top"                          bash rx/run_sim_rx_top.sh
 step "TX top"                          bash tx/run_sim_tx_top.sh
 step "TinyTapeout wrapper"             bash tt/run_sim_tt.sh
 step "LTC2308 SPI master"              bash de1soc/run_sim_ltc2308.sh
-step "UART, FIFO, and IQ framer"       bash de1soc/run_sim_uart.sh
+step "IQ FIFO over Avalon"             bash de1soc/run_sim_egress.sh
 step "DE1-SoC board top"               bash de1soc/run_sim_de1soc.sh
-step "host IQ decoder"                 python3 host/capture_iq.py --self-check
+step "host UDP receiver"               python3 host/iq_udp.py --self-check
+step "HPS streamer"                    bash hps/run_check.sh
 step "sustained throughput"            bash rx/run_throughput.sh
 
 if [ "$WITH_BER" = "1" ]; then

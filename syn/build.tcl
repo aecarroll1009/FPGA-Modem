@@ -35,8 +35,8 @@ set tops [dict create \
     tt_um_cordic_ddc  [concat $common {tt/tt_um_cordic_ddc.sv}] \
     DE1_SoC           [concat $common {rx/fir_decimate.sv rx/rx_top.sv
                                        de1soc/hex7seg.sv de1soc/ltc2308_ctrl.sv
-                                       de1soc/uart_tx.sv de1soc/byte_fifo.sv
-                                       de1soc/iq_framer.sv de1soc/DE1_SoC.sv}]]
+                                       de1soc/iq_avalon_fifo.sv
+                                       de1soc/de1soc_core.sv de1soc/DE1_SoC.sv}]]
 
 # Only DE1_SoC is a real board build with pinned-out I/O; the others are
 # core-datapath builds whose I/O is false-pathed for measurement.
@@ -49,6 +49,26 @@ if {![dict exists $tops $top]} {
 
 file mkdir $outdir
 cd $outdir
+
+# DE1_SoC wraps a Platform Designer system holding the HPS. Generate it
+# first; it is rebuilt whenever syn/soc_system.tcl moves ahead of it.
+set qsys_qip [file join $outdir soc_system synthesis soc_system.qip]
+if {$top eq "DE1_SoC"} {
+    set qsys_bin [file join $::quartus(quartus_rootpath) sopc_builder bin]
+    set qsys_src [file join $here soc_system.tcl]
+    if {![file exists $qsys_qip]
+        || [file mtime $qsys_src] > [file mtime $qsys_qip]} {
+        puts "generating soc_system (a few minutes)"
+        if {[catch {exec [file join $qsys_bin qsys-script] --script=$qsys_src} err]} {
+            puts "QSYS SCRIPT FAILED: $err"
+            exit 1
+        }
+        if {[catch {exec [file join $qsys_bin qsys-generate] soc_system.qsys                          --synthesis=VERILOG --part=$device} err]} {
+            puts "QSYS GENERATE FAILED: $err"
+            exit 1
+        }
+    }
+}
 
 project_new $top -overwrite
 
@@ -79,6 +99,10 @@ if {[lsearch -exact $pinned $top] >= 0} {
     set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
 }
 
+if {$top eq "DE1_SoC"} {
+    set_global_assignment -name QIP_FILE $qsys_qip
+}
+
 # Let synthesis optimize toward the SDC's actual timing targets rather than
 # a generic area/speed tradeoff -- the Fmax numbers this flow reports are
 # only meaningful if synthesis was aiming at the constraint being measured.
@@ -94,6 +118,20 @@ if {[catch {execute_module -tool map} err]} {
     project_close
     exit 1
 }
+# I/O standards and termination for the HPS DDR3 pins, written by Qsys.
+# Reads a post-map netlist and writes project assignments, so it runs after
+# synthesis, in its own process, with the project closed.
+if {$top eq "DE1_SoC"} {
+    set pin_script [file join $outdir soc_system synthesis submodules                               hps_sdram_p0_pin_assignments.tcl]
+    project_close
+    set sta [file join $::quartus(binpath) quartus_sta]
+    if {[catch {exec $sta -t $pin_script $top} err]} {
+        puts "HPS SDRAM PIN ASSIGNMENTS FAILED: $err"
+        exit 1
+    }
+    project_open $top
+}
+
 if {[catch {execute_module -tool fit} err]} {
     puts "FITTER FAILED: $err"
     project_close

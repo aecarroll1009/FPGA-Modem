@@ -1,39 +1,17 @@
-// DE1-SoC board top level: the RX chain, with decimated IQ streamed off the
-// board over a UART.
-// SW[0] low replays an on-chip stimulus ROM and checks it against the
-// reference model; SW[0] high digitises a live signal through the LTC2308.
-// Both modes stream, so the self-test also covers the egress path.
+// DE1-SoC board top level: pins, the Platform Designer system, and
+// de1soc_core. Structural only; the testbenches drive de1soc_core.
 //
-// -- user I/O -------------------------------------------------------------
-//   KEY[0]     reset, active low (debounced on the board)
-//   SW[0]      0 = ROM self-test, 1 = live ADC capture
-//   LEDR[0]    done: all expected self-test outputs received
-//   LEDR[1]    pass: lit alone = success
-//   LEDR[2]    fail: an output mismatched
-//   LEDR[3]    rx_top asserted out_overflow
-//   LEDR[4]    an IQ pair was dropped before the UART
-//   LEDR[5]    a conversion landed before the datapath took the previous one
-//   LEDR[6]    live mode
-//   LEDR[9]    heartbeat
-//   HEX1:HEX0  mismatch count, or live frame counter low byte
-//   HEX3:HEX2  outputs received, or live frame counter high byte
-//   HEX5:HEX4  blank
-//   UART_TX    2.5 Mbaud 8N1, framed per docs/iq_format.md
+// soc_system comes from syn/soc_system.tcl and holds the HPS and its
+// lightweight bridge. Its Avalon master drives the core's IQ FIFO, which
+// hps/iq_streamd.c drains and sends on as UDP.
 //
-// Regenerate the ROM with de1soc/gen_selftest_rom.py after a config change.
+// The HPS_* ports are the ARM side's own pins and do not cross into the
+// fabric: DDR3, gigabit Ethernet, the SD card Linux boots from, USB, a
+// console UART, and two I2C buses.
 
 `timescale 1ns/1ps
-`include "selftest_rom.svh"
 
-module DE1_SoC #(
-    // The LO the ROM's expected outputs were generated against. Overriding
-    // it invalidates them; tb_de1soc_negative does exactly that.
-    parameter logic [23:0] PHASE_INC = `SELFTEST_PHASE_INC,
-
-    // 50 MHz / 20 = 2.5 Mbaud. Lowered by the testbenches to shorten runs.
-    parameter int UART_CLKS_PER_BIT = 20,
-    parameter int SAMPLES_PER_FRAME = 64
-) (
+module DE1_SoC (
     input  logic        CLOCK_50,
     input  logic [3:0]  KEY,
     input  logic [9:0]  SW,
@@ -51,228 +29,161 @@ module DE1_SoC #(
     output logic        ADC_DIN,
     input  logic        ADC_DOUT,
 
-    // Baseband IQ egress, GPIO_0[0] on the 40-pin header.
-    output logic        UART_TX
+    // HPS DDR3.
+    output logic [14:0] HPS_DDR3_ADDR,
+    output logic [2:0]  HPS_DDR3_BA,
+    output logic        HPS_DDR3_CAS_N,
+    output logic        HPS_DDR3_CK_N,
+    output logic        HPS_DDR3_CK_P,
+    output logic        HPS_DDR3_CKE,
+    output logic        HPS_DDR3_CS_N,
+    output logic [3:0]  HPS_DDR3_DM,
+    inout  wire  [31:0] HPS_DDR3_DQ,
+    inout  wire  [3:0]  HPS_DDR3_DQS_N,
+    inout  wire  [3:0]  HPS_DDR3_DQS_P,
+    output logic        HPS_DDR3_ODT,
+    output logic        HPS_DDR3_RAS_N,
+    output logic        HPS_DDR3_RESET_N,
+    input  logic        HPS_DDR3_RZQ,
+    output logic        HPS_DDR3_WE_N,
+
+    // HPS gigabit Ethernet, RGMII.
+    output logic        HPS_ENET_GTX_CLK,
+    output logic        HPS_ENET_MDC,
+    inout  wire         HPS_ENET_MDIO,
+    input  logic        HPS_ENET_RX_CLK,
+    input  logic [3:0]  HPS_ENET_RX_DATA,
+    input  logic        HPS_ENET_RX_DV,
+    output logic [3:0]  HPS_ENET_TX_DATA,
+    output logic        HPS_ENET_TX_EN,
+
+    // HPS SD card, USB, console, and I2C.
+    output logic        HPS_SD_CLK,
+    inout  wire         HPS_SD_CMD,
+    inout  wire  [3:0]  HPS_SD_DATA,
+    input  logic        HPS_USB_CLKOUT,
+    inout  wire  [7:0]  HPS_USB_DATA,
+    input  logic        HPS_USB_DIR,
+    input  logic        HPS_USB_NXT,
+    output logic        HPS_USB_STP,
+    input  logic        HPS_UART_RX,
+    output logic        HPS_UART_TX,
+    inout  wire         HPS_I2C0_SCLK,
+    inout  wire         HPS_I2C0_SDAT,
+    inout  wire         HPS_I2C1_SCLK,
+    inout  wire         HPS_I2C1_SDAT
 );
 
-    localparam int NStim    = `SELFTEST_N_STIM;
-    localparam int NOut     = `SELFTEST_N_OUT;
-    localparam int DataBits = `SELFTEST_DATA_BITS;
-    localparam int OutBits  = `SELFTEST_OUT_BITS;
+    // Avalon-MM, from the lightweight bridge to the core's FIFO.
+    wire [9:0]  iq_address;
+    wire        iq_read, iq_write;
+    wire [31:0] iq_readdata, iq_writedata;
+    wire        iq_readdatavalid, iq_waitrequest;
 
-    // The code is left-justified into the datapath word.
-    initial begin
-        if (DataBits < 12)
-            $fatal(1, "DE1_SoC: DataBits=%0d is narrower than the LTC2308's 12 bits", DataBits);
-    end
+    // Byte addresses off the bridge, word addresses into the slave.
+    wire [2:0]  avs_address = iq_address[4:2];
 
-    // Counters must reach NStim/NOut themselves (the "all sent" and "all
-    // received" states), so they are one bit wider than the array indices
-    // derived from them -- hence the separate *IdxBits below rather than
-    // indexing with the counter directly.
-    localparam int SiBits    = $clog2(NStim + 1);
-    localparam int OiBits    = $clog2(NOut + 1);
-    localparam int SiIdxBits = $clog2(NStim);
-    localparam int OiIdxBits = $clog2(NOut);
+    // Unused: the slave takes no burst, partial word, or debug access.
+    wire [0:0]  iq_burstcount;
+    wire [3:0]  iq_byteenable;
+    wire        iq_debugaccess;
+    wire _unused_ok = &{1'b0, iq_burstcount, iq_byteenable, iq_debugaccess,
+                        iq_address[9:5], iq_address[1:0]};
 
-    wire clk   = CLOCK_50;
-    wire rst_n = KEY[0];
-
-    // Unused board inputs, named so lint does not flag them.
-    wire _unused_ok = &{1'b0, SW[9:1], KEY[3:1]};
-
-    wire live_mode = SW[0];
-
-    // -- ADC ---------------------------------------------------------------
-    wire        adc_sample_valid;
-    wire [11:0] adc_code;
-
-    ltc2308_ctrl u_adc (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .adc_convst   (ADC_CONVST),
-        .adc_sclk     (ADC_SCLK),
-        .adc_din      (ADC_DIN),
-        .adc_dout     (ADC_DOUT),
-        .sample_valid (adc_sample_valid),
-        .sample_code  (adc_code)
+    de1soc_core u_core (
+        .CLOCK_50          (CLOCK_50),
+        .KEY               (KEY),
+        .SW                (SW),
+        .LEDR              (LEDR),
+        .HEX0              (HEX0), .HEX1 (HEX1), .HEX2 (HEX2),
+        .HEX3              (HEX3), .HEX4 (HEX4), .HEX5 (HEX5),
+        .ADC_CONVST        (ADC_CONVST),
+        .ADC_SCLK          (ADC_SCLK),
+        .ADC_DIN           (ADC_DIN),
+        .ADC_DOUT          (ADC_DOUT),
+        .avs_address       (avs_address),
+        .avs_read          (iq_read),
+        .avs_readdata      (iq_readdata),
+        .avs_readdatavalid (iq_readdatavalid),
+        .avs_waitrequest   (iq_waitrequest),
+        .avs_write         (iq_write),
+        .avs_writedata     (iq_writedata)
     );
 
-    // CH0 is unipolar straight binary over 0-4.096 V. Inverting the MSB
-    // subtracts mid-scale; the result is left-justified into the datapath.
-    wire signed [11:0]         adc_signed = {~adc_code[11], adc_code[10:0]};
-    wire signed [DataBits-1:0] adc_sample = DataBits'(adc_signed) <<< (DataBits - 12);
+    soc_system u_soc (
+        .clk_clk        (CLOCK_50),
+        .reset_reset_n  (KEY[0]),
 
-    // Single-ended, so the input is real and Q is zero.
-    logic signed [DataBits-1:0] adc_hold;
-    logic                       sample_pending;
-    logic                       adc_overrun;
+        .iq_bus_address       (iq_address),
+        .iq_bus_read          (iq_read),
+        .iq_bus_readdata      (iq_readdata),
+        .iq_bus_readdatavalid (iq_readdatavalid),
+        .iq_bus_waitrequest   (iq_waitrequest),
+        .iq_bus_write         (iq_write),
+        .iq_bus_writedata     (iq_writedata),
+        .iq_bus_burstcount    (iq_burstcount),
+        .iq_bus_byteenable    (iq_byteenable),
+        .iq_bus_debugaccess   (iq_debugaccess),
 
-    // -- stimulus playback (self-test mode) --------------------------------
-    logic [SiBits-1:0] si;
-    wire               stim_left = (si < SiBits'(NStim));
+        .memory_mem_a       (HPS_DDR3_ADDR),
+        .memory_mem_ba      (HPS_DDR3_BA),
+        .memory_mem_ck      (HPS_DDR3_CK_P),
+        .memory_mem_ck_n    (HPS_DDR3_CK_N),
+        .memory_mem_cke     (HPS_DDR3_CKE),
+        .memory_mem_cs_n    (HPS_DDR3_CS_N),
+        .memory_mem_ras_n   (HPS_DDR3_RAS_N),
+        .memory_mem_cas_n   (HPS_DDR3_CAS_N),
+        .memory_mem_we_n    (HPS_DDR3_WE_N),
+        .memory_mem_reset_n (HPS_DDR3_RESET_N),
+        .memory_mem_dq      (HPS_DDR3_DQ),
+        .memory_mem_dqs     (HPS_DDR3_DQS_P),
+        .memory_mem_dqs_n   (HPS_DDR3_DQS_N),
+        .memory_mem_odt     (HPS_DDR3_ODT),
+        .memory_mem_dm      (HPS_DDR3_DM),
+        .memory_oct_rzqin   (HPS_DDR3_RZQ),
 
-    // Both modes run at the converter's 400 kS/s tick, which free-runs
-    // regardless of mode. Played faster, the ROM outruns the UART.
-    wire in_ready;
-    wire in_valid = sample_pending && (live_mode || stim_left);
-    wire accept   = in_valid && in_ready;
+        .hps_io_hps_io_emac1_inst_TX_CLK (HPS_ENET_GTX_CLK),
+        .hps_io_hps_io_emac1_inst_TXD0   (HPS_ENET_TX_DATA[0]),
+        .hps_io_hps_io_emac1_inst_TXD1   (HPS_ENET_TX_DATA[1]),
+        .hps_io_hps_io_emac1_inst_TXD2   (HPS_ENET_TX_DATA[2]),
+        .hps_io_hps_io_emac1_inst_TXD3   (HPS_ENET_TX_DATA[3]),
+        .hps_io_hps_io_emac1_inst_RXD0   (HPS_ENET_RX_DATA[0]),
+        .hps_io_hps_io_emac1_inst_RXD1   (HPS_ENET_RX_DATA[1]),
+        .hps_io_hps_io_emac1_inst_RXD2   (HPS_ENET_RX_DATA[2]),
+        .hps_io_hps_io_emac1_inst_RXD3   (HPS_ENET_RX_DATA[3]),
+        .hps_io_hps_io_emac1_inst_MDIO   (HPS_ENET_MDIO),
+        .hps_io_hps_io_emac1_inst_MDC    (HPS_ENET_MDC),
+        .hps_io_hps_io_emac1_inst_RX_CTL (HPS_ENET_RX_DV),
+        .hps_io_hps_io_emac1_inst_TX_CTL (HPS_ENET_TX_EN),
+        .hps_io_hps_io_emac1_inst_RX_CLK (HPS_ENET_RX_CLK),
 
-    // Held in range while draining: indexing a localparam array past its end
-    // is an X in simulation, and the value is unused once stim_left drops.
-    wire [SiIdxBits-1:0] si_idx = stim_left ? si[SiIdxBits-1:0] : '0;
+        .hps_io_hps_io_sdio_inst_CMD (HPS_SD_CMD),
+        .hps_io_hps_io_sdio_inst_D0  (HPS_SD_DATA[0]),
+        .hps_io_hps_io_sdio_inst_D1  (HPS_SD_DATA[1]),
+        .hps_io_hps_io_sdio_inst_CLK (HPS_SD_CLK),
+        .hps_io_hps_io_sdio_inst_D2  (HPS_SD_DATA[2]),
+        .hps_io_hps_io_sdio_inst_D3  (HPS_SD_DATA[3]),
 
-    wire signed [DataBits-1:0] rx_i = live_mode ? adc_hold : SELFTEST_STIM_I[si_idx];
-    wire signed [DataBits-1:0] rx_q = live_mode ? '0       : SELFTEST_STIM_Q[si_idx];
+        .hps_io_hps_io_usb1_inst_D0  (HPS_USB_DATA[0]),
+        .hps_io_hps_io_usb1_inst_D1  (HPS_USB_DATA[1]),
+        .hps_io_hps_io_usb1_inst_D2  (HPS_USB_DATA[2]),
+        .hps_io_hps_io_usb1_inst_D3  (HPS_USB_DATA[3]),
+        .hps_io_hps_io_usb1_inst_D4  (HPS_USB_DATA[4]),
+        .hps_io_hps_io_usb1_inst_D5  (HPS_USB_DATA[5]),
+        .hps_io_hps_io_usb1_inst_D6  (HPS_USB_DATA[6]),
+        .hps_io_hps_io_usb1_inst_D7  (HPS_USB_DATA[7]),
+        .hps_io_hps_io_usb1_inst_CLK (HPS_USB_CLKOUT),
+        .hps_io_hps_io_usb1_inst_STP (HPS_USB_STP),
+        .hps_io_hps_io_usb1_inst_DIR (HPS_USB_DIR),
+        .hps_io_hps_io_usb1_inst_NXT (HPS_USB_NXT),
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            adc_hold       <= '0;
-            sample_pending <= 1'b0;
-            adc_overrun    <= 1'b0;
-        end else begin
-            if (sample_pending && accept)
-                sample_pending <= 1'b0;
+        .hps_io_hps_io_uart0_inst_RX (HPS_UART_RX),
+        .hps_io_hps_io_uart0_inst_TX (HPS_UART_TX),
 
-            if (adc_sample_valid) begin
-                // Datapath fell behind; the older sample is replaced.
-                // Live mode only: the self-test leaves samples unconsumed.
-                if (sample_pending && live_mode && !accept)
-                    adc_overrun <= 1'b1;
-                adc_hold       <= adc_sample;
-                sample_pending <= 1'b1;
-            end
-        end
-    end
-
-    // -- the design under test --------------------------------------------
-    wire                        out_valid;
-    wire signed [OutBits-1:0]   iq_i, iq_q;
-    wire                        out_overflow;
-
-    rx_top u_rx (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .phase_inc    (PHASE_INC),
-        .in_valid     (in_valid),
-        .in_ready     (in_ready),
-        .adc_i        (rx_i),
-        .adc_q        (rx_q),
-        .out_valid    (out_valid),
-        // The framer drops and flags rather than stalling.
-        .out_ready    (1'b1),
-        .iq_i         (iq_i),
-        .iq_q         (iq_q),
-        .out_overflow (out_overflow)
+        .hps_io_hps_io_i2c0_inst_SDA (HPS_I2C0_SDAT),
+        .hps_io_hps_io_i2c0_inst_SCL (HPS_I2C0_SCLK),
+        .hps_io_hps_io_i2c1_inst_SDA (HPS_I2C1_SDAT),
+        .hps_io_hps_io_i2c1_inst_SCL (HPS_I2C1_SCLK)
     );
-
-    // -- egress: frame, buffer, serialise ----------------------------------
-    wire        fr_valid, fr_ready;
-    wire [7:0]  fr_byte;
-    wire        tx_overflow;
-    wire [15:0] frame_count;
-
-    iq_framer #(
-        .DATA_BITS         (OutBits),
-        .SAMPLES_PER_FRAME (SAMPLES_PER_FRAME)
-    ) u_framer (
-        .clk         (clk),
-        .rst_n       (rst_n),
-        .in_valid    (out_valid),
-        .in_i        (iq_i),
-        .in_q        (iq_q),
-        .out_valid   (fr_valid),
-        .out_byte    (fr_byte),
-        .out_ready   (fr_ready),
-        .overflow    (tx_overflow),
-        .frame_count (frame_count)
-    );
-
-    // 32 bytes covers the 10-byte header burst.
-    wire       fifo_full, fifo_empty;
-    wire [7:0] fifo_byte;
-    wire       uart_ready;
-
-    assign fr_ready = !fifo_full;
-
-    byte_fifo #(.DEPTH(32)) u_fifo (
-        .clk     (clk),
-        .rst_n   (rst_n),
-        .wr_en   (fr_valid),
-        .wr_data (fr_byte),
-        .full    (fifo_full),
-        .rd_en   (uart_ready && !fifo_empty),
-        .rd_data (fifo_byte),
-        .empty   (fifo_empty)
-    );
-
-    uart_tx #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) u_uart (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .in_valid (!fifo_empty),
-        .in_byte  (fifo_byte),
-        .in_ready (uart_ready),
-        .tx       (UART_TX)
-    );
-
-    // -- compare against the reference model's answer ----------------------
-    // Self-test only: live capture has no expected output.
-    logic [OiBits-1:0] oi;      // index of the next expected output
-    logic [7:0]        n_bad;   // mismatches, saturating so it never wraps to 0
-    logic [7:0]        n_recv;  // outputs received, saturating for the same reason
-    logic              done;
-
-    wire [OiIdxBits-1:0] oi_idx = (oi < OiBits'(NOut)) ? oi[OiIdxBits-1:0] : '0;
-    wire mismatch = (iq_i !== SELFTEST_OUT_I[oi_idx])
-                 || (iq_q !== SELFTEST_OUT_Q[oi_idx]);
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            si     <= '0;
-            oi     <= '0;
-            n_bad  <= '0;
-            n_recv <= '0;
-            done   <= 1'b0;
-        end else begin
-            if (accept && !live_mode) si <= si + 1'b1;
-
-            if (out_valid && !done && !live_mode) begin
-                if (mismatch && n_bad != 8'hFF)  n_bad  <= n_bad + 1'b1;
-                if (n_recv != 8'hFF)             n_recv <= n_recv + 1'b1;
-                if (oi == OiBits'(NOut - 1)) done <= 1'b1;
-                else                         oi   <= oi + 1'b1;
-            end
-        end
-    end
-
-    // -- reporting ---------------------------------------------------------
-    // Free-running, so a stopped clock is distinguishable from no output.
-    logic [24:0] beat;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) beat <= '0;
-        else        beat <= beat + 1'b1;
-    end
-
-    assign LEDR[0]   = done;
-    assign LEDR[1]   = done && (n_bad == '0);
-    assign LEDR[2]   = (n_bad != '0);
-    assign LEDR[3]   = out_overflow;
-    assign LEDR[4]   = tx_overflow;
-    assign LEDR[5]   = adc_overrun;
-    assign LEDR[6]   = live_mode;
-    assign LEDR[8:7] = '0;
-    assign LEDR[9]   = beat[24];
-
-    // Live mode shows the frame counter, since the self-test counters
-    // never move.
-    wire [7:0] hex_lo = live_mode ? frame_count[7:0]  : n_bad;
-    wire [7:0] hex_hi = live_mode ? frame_count[15:8] : n_recv;
-
-    hex7seg h0 (.value(hex_lo[3:0]), .blank(1'b0), .seg(HEX0));
-    hex7seg h1 (.value(hex_lo[7:4]), .blank(1'b0), .seg(HEX1));
-    hex7seg h2 (.value(hex_hi[3:0]), .blank(1'b0), .seg(HEX2));
-    hex7seg h3 (.value(hex_hi[7:4]), .blank(1'b0), .seg(HEX3));
-    hex7seg h4 (.value(4'h0), .blank(1'b1), .seg(HEX4));
-    hex7seg h5 (.value(4'h0), .blank(1'b1), .seg(HEX5));
 
 endmodule

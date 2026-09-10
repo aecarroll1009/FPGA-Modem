@@ -1,8 +1,8 @@
-// Self-checking testbenches for the DE1-SoC board top level.
+// Self-checking testbenches for de1soc_core.
 // tb_de1soc plays the self-test stimulus and checks the reported
 // pass/fail/counts; tb_de1soc_negative feeds a mismatched expectation and
-// checks failure is reported; tb_de1soc_live drives the ADC pins and decodes
-// UART_TX.
+// checks failure is reported; tb_de1soc_live drives the ADC pins and drains
+// the FIFO over Avalon the way the HPS daemon does.
 //
 // Run via de1soc/run_sim_de1soc.sh.
 
@@ -14,14 +14,24 @@ module tb_de1soc;
 
     logic        CLOCK_50 = 0;
     logic [3:0]  KEY;
-    logic [9:0]  SW = '0;
+    logic [9:0]  SW;
     wire  [9:0]  LEDR;
     wire  [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5;
     wire         ADC_CONVST, ADC_SCLK, ADC_DIN;
     logic        ADC_DOUT = 1'b0;
-    wire         UART_TX;
 
-    DE1_SoC dut (
+    logic [2:0]  avs_address   = '0;
+    logic        avs_read      = 1'b0;
+    wire  [31:0] avs_readdata;
+    wire         avs_readdatavalid;
+    wire         avs_waitrequest;
+    logic        avs_write     = 1'b0;
+    logic [31:0] avs_writedata = '0;
+
+    // The BFM drives a net named clk.
+    wire clk = CLOCK_50;
+
+    de1soc_core dut (
         .CLOCK_50   (CLOCK_50),
         .KEY        (KEY),
         .SW         (SW),
@@ -36,7 +46,13 @@ module tb_de1soc;
         .ADC_SCLK   (ADC_SCLK),
         .ADC_DIN    (ADC_DIN),
         .ADC_DOUT   (ADC_DOUT),
-        .UART_TX    (UART_TX)
+        .avs_address   (avs_address),
+        .avs_read      (avs_read),
+        .avs_readdata  (avs_readdata),
+        .avs_readdatavalid (avs_readdatavalid),
+        .avs_waitrequest   (avs_waitrequest),
+        .avs_write     (avs_write),
+        .avs_writedata (avs_writedata)
     );
 
     always #10 CLOCK_50 <= ~CLOCK_50;   // 50 MHz
@@ -49,8 +65,34 @@ module tb_de1soc;
     int n_fail = 0;
     int cycles;
 
+    `include "avalon_bfm.svh"
+
+    // The host's view of the same self-test: the words the HPS reads must
+    // match the ROM the on-chip comparator uses.
+    localparam int NOut = `SELFTEST_N_OUT;
+    localparam logic [2:0] RegCtrl = 3'd1, RegLevel = 3'd3, RegData = 3'd5;
+
+    logic [31:0] rx [0:NOut-1];
+    int n_rx = 0;
+
+    initial begin
+        logic [31:0] lvl, w;
+        @(posedge KEY[0]);
+        av_write(RegCtrl, 32'h0000_0002);      // streaming on
+        while (n_rx < NOut) begin
+            av_read(RegLevel, lvl);
+            while (lvl != 0 && n_rx < NOut) begin
+                av_read(RegData, w);
+                rx[n_rx] = w;
+                n_rx++;
+                lvl--;
+            end
+        end
+    end
+
     initial begin
         KEY = 4'b1111;
+        SW  = 10'b0;                    // ROM self-test
         KEY[0] = 1'b0;                  // held reset (buttons read 0 pressed)
         repeat (4) @(posedge CLOCK_50);
         KEY[0] = 1'b1;
@@ -58,7 +100,7 @@ module tb_de1soc;
         // ~19 clocks per sample through the mixer, plus the FIR's own work.
         // Allow generous margin; the loop exits as soon as done rises.
         cycles = 0;
-        while (!done && cycles < 200_000) begin
+        while ((!done || n_rx < NOut) && cycles < 200_000) begin
             @(posedge CLOCK_50);
             cycles++;
         end
@@ -100,6 +142,20 @@ module tb_de1soc;
                 n_fail++;
                 $display("FAIL: live-mode LED lit with SW[0] low");
             end
+
+            if (n_rx < NOut) begin
+                n_fail++;
+                $display("FAIL: only %0d of %0d words reached the HPS bus", n_rx, NOut);
+            end else begin
+                for (int s = 0; s < NOut; s++) begin
+                    if (`SELFTEST_OUT_BITS'(rx[s][31:16]) !== SELFTEST_OUT_I[s] ||
+                        `SELFTEST_OUT_BITS'(rx[s][15:0])  !== SELFTEST_OUT_Q[s]) begin
+                        n_fail++;
+                        $display("FAIL: word %0d read %08h, ROM says (%0d,%0d)",
+                                 s, rx[s], SELFTEST_OUT_I[s], SELFTEST_OUT_Q[s]);
+                    end
+                end
+            end
         end
 
         if (n_fail == 0)
@@ -121,16 +177,26 @@ module tb_de1soc_negative;
 
     logic        CLOCK_50 = 0;
     logic [3:0]  KEY;
-    logic [9:0]  SW = '0;
+    logic [9:0]  SW;
     wire  [9:0]  LEDR;
     wire  [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5;
     wire         ADC_CONVST, ADC_SCLK, ADC_DIN;
     logic        ADC_DOUT = 1'b0;
-    wire         UART_TX;
+
+    logic [2:0]  avs_address   = '0;
+    logic        avs_read      = 1'b0;
+    wire  [31:0] avs_readdata;
+    wire         avs_readdatavalid;
+    wire         avs_waitrequest;
+    logic        avs_write     = 1'b0;
+    logic [31:0] avs_writedata = '0;
+
+    // The BFM drives a net named clk.
+    wire clk = CLOCK_50;
 
     // Overrides PHASE_INC so every output legitimately mismatches the ROM's
     // expectation -- corrupts the design's input rather than forcing internals.
-    DE1_SoC #(.PHASE_INC(`SELFTEST_PHASE_INC ^ 24'h000100)) dut (
+    de1soc_core #(.PHASE_INC(`SELFTEST_PHASE_INC ^ 24'h000100)) dut (
         .CLOCK_50   (CLOCK_50),
         .KEY        (KEY),
         .SW         (SW),
@@ -141,15 +207,38 @@ module tb_de1soc_negative;
         .ADC_SCLK   (ADC_SCLK),
         .ADC_DIN    (ADC_DIN),
         .ADC_DOUT   (ADC_DOUT),
-        .UART_TX    (UART_TX)
+        .avs_address   (avs_address),
+        .avs_read      (avs_read),
+        .avs_readdata  (avs_readdata),
+        .avs_readdatavalid (avs_readdatavalid),
+        .avs_waitrequest   (avs_waitrequest),
+        .avs_write     (avs_write),
+        .avs_writedata (avs_writedata)
     );
 
     always #10 CLOCK_50 <= ~CLOCK_50;
 
     int cycles;
 
+    `include "avalon_bfm.svh"
+
+    // Streams and discards; the corrupted run uses the same egress path.
+    initial begin
+        logic [31:0] lvl, w;
+        @(posedge KEY[0]);
+        av_write(3'd1, 32'h0000_0002);
+        forever begin
+            av_read(3'd3, lvl);
+            while (lvl != 0) begin
+                av_read(3'd5, w);
+                lvl--;
+            end
+        end
+    end
+
     initial begin
         KEY = 4'b1111;
+        SW  = 10'b0;
         KEY[0] = 1'b0;
         repeat (4) @(posedge CLOCK_50);
         KEY[0] = 1'b1;
@@ -175,20 +264,17 @@ endmodule
 
 
 // Live-ADC mode, end to end: an LTC2308 model feeds a known tone into the
-// converter pins, and the framed IQ leaving UART_TX is decoded and checked
-// against the reference model. The only test covering the whole board path
-// as one piece.
+// converter pins and an Avalon master drains the FIFO the way the HPS
+// daemon does, checking every word against the reference model. The only
+// test covering the whole board path as one piece.
 module tb_de1soc_live;
 
-    // Short bit period; the board uses 20.
-    localparam int ClksPerBit      = 4;
-    localparam int SamplesPerFrame = 64;
-    localparam int NOut            = `ADC_N_OUT;
-    localparam int NCodes          = `ADC_N_CODES;
+    localparam int NOut    = `ADC_N_OUT;
+    localparam int NCodes  = `ADC_N_CODES;
+    localparam int OutBits = `SELFTEST_OUT_BITS;
 
-    // 6 header bytes per frame, 4 per IQ pair.
-    localparam int NFramesExpected = (NOut + SamplesPerFrame - 1) / SamplesPerFrame;
-    localparam int NBytesExpected  = NFramesExpected * 6 + NOut * 4;
+    localparam logic [2:0] RegCtrl   = 3'd1, RegLevel = 3'd3,
+                           RegStatus = 3'd4, RegData  = 3'd5;
 
     logic        CLOCK_50 = 0;
     logic [3:0]  KEY;
@@ -197,26 +283,41 @@ module tb_de1soc_live;
     wire  [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5;
     wire         ADC_CONVST, ADC_SCLK, ADC_DIN;
     wire         ADC_DOUT;
-    wire         UART_TX;
 
-    DE1_SoC #(
-        .UART_CLKS_PER_BIT (ClksPerBit),
-        .SAMPLES_PER_FRAME (SamplesPerFrame)
-    ) dut (
-        .CLOCK_50   (CLOCK_50),
-        .KEY        (KEY),
-        .SW         (SW),
-        .LEDR       (LEDR),
-        .HEX0       (HEX0), .HEX1 (HEX1), .HEX2 (HEX2),
-        .HEX3       (HEX3), .HEX4 (HEX4), .HEX5 (HEX5),
-        .ADC_CONVST (ADC_CONVST),
-        .ADC_SCLK   (ADC_SCLK),
-        .ADC_DIN    (ADC_DIN),
-        .ADC_DOUT   (ADC_DOUT),
-        .UART_TX    (UART_TX)
+    logic [2:0]  avs_address   = '0;
+    logic        avs_read      = 1'b0;
+    wire  [31:0] avs_readdata;
+    wire         avs_readdatavalid;
+    wire         avs_waitrequest;
+    logic        avs_write     = 1'b0;
+    logic [31:0] avs_writedata = '0;
+
+    // The BFM drives a net named clk.
+    wire clk = CLOCK_50;
+
+    de1soc_core dut (
+        .CLOCK_50      (CLOCK_50),
+        .KEY           (KEY),
+        .SW            (SW),
+        .LEDR          (LEDR),
+        .HEX0          (HEX0), .HEX1 (HEX1), .HEX2 (HEX2),
+        .HEX3          (HEX3), .HEX4 (HEX4), .HEX5 (HEX5),
+        .ADC_CONVST    (ADC_CONVST),
+        .ADC_SCLK      (ADC_SCLK),
+        .ADC_DIN       (ADC_DIN),
+        .ADC_DOUT      (ADC_DOUT),
+        .avs_address   (avs_address),
+        .avs_read      (avs_read),
+        .avs_readdata  (avs_readdata),
+        .avs_readdatavalid (avs_readdatavalid),
+        .avs_waitrequest   (avs_waitrequest),
+        .avs_write     (avs_write),
+        .avs_writedata (avs_writedata)
     );
 
     always #10 CLOCK_50 <= ~CLOCK_50;   // 50 MHz
+
+    `include "avalon_bfm.svh"
 
     // -- the converter -----------------------------------------------------
     wire [15:0] conv_count;
@@ -241,45 +342,32 @@ module tb_de1soc_live;
         .conv_count (conv_count)
     );
 
-    // -- UART receiver -----------------------------------------------------
-    logic [7:0] rx [0:NBytesExpected*2-1];
+    // -- the reader ---------------------------------------------------------
+    // Poll LEVEL, then pop that many words: what hps/iq_streamd.c does.
+    logic [31:0] rx [0:NOut-1];
     int n_rx = 0;
     int n_fail = 0;
 
-    task automatic uart_receive(output logic [7:0] b, output bit ok);
-        int k;
-        begin
-            ok = 1'b1;
-            @(negedge UART_TX);
-            repeat (ClksPerBit / 2) @(posedge CLOCK_50);
-            if (UART_TX !== 1'b0) ok = 1'b0;
-            for (k = 0; k < 8; k++) begin
-                repeat (ClksPerBit) @(posedge CLOCK_50);
-                b[k] = UART_TX;
-            end
-            repeat (ClksPerBit) @(posedge CLOCK_50);
-            if (UART_TX !== 1'b1) ok = 1'b0;
-        end
-    endtask
-
     initial begin
-        logic [7:0] b;
-        bit ok;
-        forever begin
-            uart_receive(b, ok);
-            if (!ok && n_rx < NBytesExpected) begin
-                n_fail++;
-                $display("FAIL: UART framing error on byte %0d", n_rx);
+        logic [31:0] lvl, w;
+        @(posedge KEY[0]);
+        // Decimated tap, streaming on -- the vectors are FIR outputs.
+        av_write(RegCtrl, 32'h0000_0002);
+        while (n_rx < NOut) begin
+            av_read(RegLevel, lvl);
+            while (lvl != 0 && n_rx < NOut) begin
+                av_read(RegData, w);
+                rx[n_rx] = w;
+                n_rx++;
+                lvl--;
             end
-            if (n_rx < NBytesExpected*2) rx[n_rx] = b;
-            n_rx++;
         end
     end
 
-    // -- run and check -----------------------------------------------------
-    int cycles, s, p, f;
-    logic [15:0] seq;
-    logic signed [`SELFTEST_OUT_BITS-1:0] dec_i, dec_q;
+    // -- run and check ------------------------------------------------------
+    int cycles, s;
+    logic [31:0] status;
+    logic signed [OutBits-1:0] dec_i, dec_q;
 
     initial begin
         KEY = 4'b1111;
@@ -290,55 +378,49 @@ module tb_de1soc_live;
         KEY[0] = 1'b1;
 
         cycles = 0;
-        while (n_rx < NBytesExpected && cycles < 400_000) begin
+        while (n_rx < NOut && cycles < 400_000) begin
             @(posedge CLOCK_50);
             cycles++;
         end
 
-        if (n_rx < NBytesExpected) begin
+        if (n_rx < NOut) begin
             n_fail++;
-            $display("FAIL: received %0d bytes in %0d clocks, expected %0d",
-                     n_rx, cycles, NBytesExpected);
+            $display("FAIL: drained %0d words in %0d clocks, expected %0d",
+                     n_rx, cycles, NOut);
         end else begin
-            p = 0;
             for (s = 0; s < NOut; s++) begin
-                if (s % SamplesPerFrame == 0) begin
-                    f = s / SamplesPerFrame;
-                    if (rx[p]   !== 8'h53 || rx[p+1] !== 8'h44 ||
-                        rx[p+2] !== 8'h52 || rx[p+3] !== 8'h01) begin
-                        n_fail++;
-                        $display("FAIL: frame %0d magic is %02h%02h%02h%02h at byte %0d",
-                                 f, rx[p], rx[p+1], rx[p+2], rx[p+3], p);
-                    end
-                    seq = {rx[p+4], rx[p+5]};
-                    if (seq !== 16'(f)) begin
-                        n_fail++;
-                        $display("FAIL: frame %0d sequence is %0d", f, seq);
-                    end
-                    p += 6;
-                end
-                dec_i = `SELFTEST_OUT_BITS'({rx[p],   rx[p+1]});
-                dec_q = `SELFTEST_OUT_BITS'({rx[p+2], rx[p+3]});
+                dec_i = OutBits'(rx[s][31:16]);
+                dec_q = OutBits'(rx[s][15:0]);
                 if (dec_i !== ADC_OUT_I[s] || dec_q !== ADC_OUT_Q[s]) begin
                     n_fail++;
-                    $display("FAIL: output %0d decoded (%0d,%0d), model says (%0d,%0d)",
+                    $display("FAIL: output %0d read (%0d,%0d), model says (%0d,%0d)",
                              s, dec_i, dec_q, ADC_OUT_I[s], ADC_OUT_Q[s]);
                 end
-                p += 4;
             end
+        end
+
+        repeat (4) @(posedge CLOCK_50);
+        av_read(RegStatus, status);
+        if (status !== 32'd0) begin
+            n_fail++;
+            $display("FAIL: STATUS reports %08h, expected a clean drain", status);
         end
 
         if (!LEDR[6]) begin
             n_fail++;
             $display("FAIL: live-mode LED is dark with SW[0] high");
         end
+        if (!LEDR[7]) begin
+            n_fail++;
+            $display("FAIL: streaming LED is dark after CTRL enabled it");
+        end
         if (LEDR[3]) begin n_fail++; $display("FAIL: rx_top out_overflow latched"); end
         if (LEDR[4]) begin n_fail++; $display("FAIL: egress overflow latched"); end
         if (LEDR[5]) begin n_fail++; $display("FAIL: ADC overrun latched"); end
 
         if (n_fail == 0)
-            $display("DE1_SoC LIVE ADC PASSED (%0d outputs over %0d frames, %0d bytes, bit-exact vs the reference model)",
-                     NOut, NFramesExpected, NBytesExpected);
+            $display("DE1_SoC LIVE ADC PASSED (%0d words drained over Avalon in %0d clocks, bit-exact vs the reference model)",
+                     NOut, cycles);
         else begin
             $display("%0d CHECKS FAILED", n_fail);
             $fatal(1, "tb_de1soc_live: %0d check(s) failed", n_fail);

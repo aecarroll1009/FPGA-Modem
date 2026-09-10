@@ -1,6 +1,9 @@
 // Synthesizable top level for the RX chain: ADC-rate IQ in, baseband IQ out.
 // Built by the Quartus flow in syn/ (see syn/build.tcl).
 //
+// tap_full picks the egress point: the mixer output at fs_in, or the FIR
+// output at fs_in/DECIM. The FIR runs either way.
+//
 // Egress is a stub valid/ready stream since the physical link is not chosen
 // yet; syn/rx_top.sdc false-paths that I/O.
 //
@@ -25,8 +28,7 @@ module rx_top #(
     input  logic                        clk,
     input  logic                        rst_n,
 
-    // Frequency control. Static in normal operation; a register interface
-    // replaces this port once there is one.
+    // Frequency control. Static within a capture.
     input  logic [PHASE_BITS-1:0]       phase_inc,
 
     // ADC-side input stream. in_ready is real backpressure: the CORDIC is
@@ -37,9 +39,10 @@ module rx_top #(
     input  logic signed [DATA_BITS-1:0] adc_i,
     input  logic signed [DATA_BITS-1:0] adc_q,
 
-    // Baseband IQ egress (stub interface -- see the header note). Runs at
-    // fs_in/DECIM, not fs_in -- one valid pulse per FIR output, not per
-    // mixer output.
+    // 1 = mixer output at fs_in, 0 = FIR output at fs_in/DECIM.
+    input  logic                        tap_full,
+
+    // Baseband IQ egress (stub interface -- see the header note).
     output logic                        out_valid,
     input  logic                        out_ready,
     output logic signed [OUT_BITS-1:0]  iq_i,
@@ -96,9 +99,21 @@ module rx_top #(
         .out_q     (fir_q)
     );
 
-    assign out_valid = fir_valid;
-    assign iq_i      = fir_i;
-    assign iq_q      = fir_q;
+    // The mixer carries one bit of headroom over OUT_BITS.
+    localparam logic signed [MIX_BITS-1:0] TapMax = MIX_BITS'((1 <<< (OUT_BITS-1)) - 1);
+    localparam logic signed [MIX_BITS-1:0] TapMin = MIX_BITS'(-(1 <<< (OUT_BITS-1)));
+
+    function automatic logic signed [OUT_BITS-1:0] sat_tap(
+        input logic signed [MIX_BITS-1:0] v
+    );
+        if (v > TapMax)      sat_tap = TapMax[OUT_BITS-1:0];
+        else if (v < TapMin) sat_tap = TapMin[OUT_BITS-1:0];
+        else                 sat_tap = v[OUT_BITS-1:0];
+    endfunction
+
+    assign out_valid = tap_full ? mix_valid      : fir_valid;
+    assign iq_i      = tap_full ? sat_tap(mix_i) : fir_i;
+    assign iq_q      = tap_full ? sat_tap(mix_q) : fir_q;
 
     // Sticky: a consumer that could not take a sample dropped it.
     always_ff @(posedge clk or negedge rst_n) begin

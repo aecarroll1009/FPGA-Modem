@@ -1,67 +1,79 @@
-# IQ wire format
+# IQ path off the board
 
-What `de1soc/iq_framer.sv` emits and `host/capture_iq.py` decodes.
+The FPGA fills a FIFO, the HPS drains it over the lightweight bridge and
+sends UDP. `de1soc/iq_avalon_fifo.sv`, `hps/iq_streamd.c`, `host/iq_udp.py`.
 
-## Link
+## Register map
 
-| | |
-|---|---|
-| Pin | GPIO_0[0], `PIN_AC18` |
-| Level | 3.3 V LVTTL — not RS-232 |
-| Baud | 2 500 000, 8N1, no flow control |
-| Direction | FPGA → host only |
+Avalon-MM slave at `0xFF200000`, the base of the lightweight HPS-to-FPGA
+bridge. Word offsets; also in `hps/iq_regs.h`.
 
-Wire GPIO_0[0] to the adapter's RX and tie the grounds together. 2.5 Mbaud is
-inside the FT232R's ceiling; CH340-class adapters often top out below it and
-drop bytes.
+| off | reg | | |
+|---|---|---|---|
+| 0x00 | ID | RO | `0x53445202` — "SDR", version 2 |
+| 0x04 | CTRL | RW | `[0]` full-rate tap, `[1]` enable, `[2]` flush |
+| 0x08 | PHASE_INC | RW | `[23:0]` LO tuning word |
+| 0x0C | LEVEL | RO | words ready |
+| 0x10 | STATUS | RO | `[15:0]` pairs dropped, `[16]` overflow |
+| 0x14 | DATA | RO | pops `{i[15:0], q[15:0]}`, zero when empty |
 
-## Frame
+Reads have a fixed latency of one clock and never stall. `enable` is low
+out of reset, so nothing is dropped while Linux boots. `flush` clears the
+FIFO and the drop counters and clears itself.
 
-262 bytes: a 6-byte header then 64 IQ pairs. All multi-byte fields big-endian.
+`PHASE_INC` is a fraction of the converter's 400 kS/s, since the NCO
+advances once per ADC sample whichever tap is selected:
 
 ```
-offset  size  field
-------  ----  ---------------------------------------------
-     0     4  magic: 0x53 0x44 0x52 0x01  ("SDR", version 1)
-     4     2  frame counter, wraps at 65536
-     6   256  64 pairs of I high, I low, Q high, Q low (int16)
+phase_inc = round(f_lo / 400000 * 2**24) mod 2**24
 ```
 
-Samples are 16-bit signed at 50 kS/s.
+`CTRL[0]` picks where the samples come from: the mixer at 400 kS/s, or the
+decimating FIR at 50 kS/s. Full rate is the default and gives 200 kHz of
+spectrum against the FIR's 25 kHz.
 
-## Reading
+## Wire format
 
-Scan for the magic to synchronise; a mid-stream attach finds the next boundary
-within 262 bytes. The magic can occur inside payload data, so `capture_iq.py`
-requires the frame counter to advance across consecutive frames before
-trusting the alignment. Counter gaps mean lost bytes — usually an adapter that
-cannot hold the baud rate.
+Raw interleaved little-endian `int16`, I then Q, 360 pairs per datagram.
+No header: UDP already delimits, and a header would need a custom GNU
+Radio block to strip. 1440 bytes fits a 1500-byte MTU without fragmenting.
 
-## Rate
+Drops are counted in `STATUS`, not marked in the stream; `iq_streamd`
+prints them as they happen.
 
-| | |
-|---|---|
-| Payload | 50 000 IQ/s × 4 B = 200 000 B/s |
-| With framing | 204 688 B/s |
-| Capacity | 250 000 B/s |
-| Utilisation | 81.9% |
+## Rates
 
-A 32-byte FIFO in `DE1_SoC.sv` absorbs the header burst.
+| | full rate | decimated |
+|---|---|---|
+| Samples | 400 kS/s | 50 kS/s |
+| Payload | 1.60 MB/s | 200 kB/s |
+| Datagrams | 4444/s | 556/s |
+| Share of the gigabit link | 1.3% | 0.2% |
 
-## Overflow
+A 4096-word FIFO holds about 10 ms at the full rate, which covers the gaps
+a userspace reader takes. Each `/dev/mem` read is an uncached bus access of
+roughly half a microsecond, so draining 400 kS/s costs a fifth of a core.
 
-`LEDR[4]` latches if an IQ pair is dropped before the UART, `LEDR[5]` if the
-converter outruns the datapath. Drops are not marked in the stream — the frame
-stays 64 samples — so the LEDs are the only indication.
+## Reading it
+
+Live, in GNU Radio (`host/rx_qpsk.grc`): a stock `udp_source` of shorts
+into `interleaved_short_to_complex`.
+
+To a file:
+
+```
+python host/iq_udp.py --out build/capture.cf32 --seconds 5
+```
 
 ## Self-test mode
 
-With `SW[0]` low the board replays its stimulus ROM instead of the ADC, so the
-output is known in advance:
+With `SW[0]` low the board replays its stimulus ROM instead of the ADC, so
+the samples are known in advance. Run `iq_streamd --rate decimated` — the
+ROM's expected outputs are FIR outputs — then:
 
 ```
-python host/capture_iq.py --port COM4 --check-selftest
+python host/iq_udp.py --check-selftest
 ```
 
-That checks framing, baud rate, byte order, and the adapter before any analog
-signal is involved.
+That checks the datapath, the bridge, the daemon, and the network before
+any analog signal is involved.

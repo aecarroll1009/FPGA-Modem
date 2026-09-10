@@ -4,11 +4,13 @@ options:
     catch_exceptions: 'True'
     category: '[GRC Hier Blocks]'
     cmake_opt: ''
-    comment: "Views the baseband IQ captured from the DE1-SoC by\nhost/capture_iq.py\
-      \ --format cfloat.\n\nThe FPGA has no carrier or timing recovery, so a real\n\
-      signal shows the constellation rotating; see the README's\nroadmap."
+    comment: "Live baseband IQ from the DE1-SoC, straight off the wire.\n\nStart hps/iq_streamd\
+      \ on the board pointing at this host,\nthen run this flowgraph. No throttle:\
+      \ the board's 400 kS/s\npaces the stream.\n\nThe FPGA has no carrier or timing\
+      \ recovery, so a real\nsignal shows the constellation rotating; see the README's\n\
+      roadmap."
     copyright: ''
-    description: DE1-SoC baseband IQ viewer
+    description: DE1-SoC live IQ viewer
     gen_cmake: 'On'
     gen_linking: dynamic
     generate_options: qt_gui
@@ -18,13 +20,13 @@ options:
     output_language: python
     placement: (0,0)
     qt_qss_theme: ''
-    realtime_scheduling: ''
+    realtime_scheduling: 'On'
     run: 'True'
     run_command: '{python} -u {filename}'
     run_options: prompt
     sizing_mode: fixed
     thread_safe_setters: ''
-    title: DE1-SoC baseband IQ
+    title: DE1-SoC live IQ
     window_size: (1200,900)
   states:
     bus_sink: false
@@ -38,8 +40,8 @@ blocks:
 - name: samp_rate
   id: variable
   parameters:
-    comment: 'fs_out: 400 kS/s decimated by 8'
-    value: '50000'
+    comment: 'Mixer rate. 50000 if iq_streamd ran with --rate decimated.'
+    value: '400000'
   states:
     bus_sink: false
     bus_source: false
@@ -47,16 +49,16 @@ blocks:
     coordinate: [200, 12]
     rotation: 0
     state: enabled
-- name: iq_path
+- name: udp_port
   id: parameter
   parameters:
     alias: ''
-    comment: Written by host/capture_iq.py --format cfloat
+    comment: Must match iq_streamd --port
     hide: none
-    label: IQ capture file
+    label: UDP port
     short_id: ''
-    type: str
-    value: ../build/capture.cf32
+    type: intx
+    value: '5000'
   states:
     bus_sink: false
     bus_source: false
@@ -64,45 +66,45 @@ blocks:
     coordinate: [352, 12]
     rotation: 0
     state: enabled
-- name: blocks_file_source_0
-  id: blocks_file_source
+- name: blocks_udp_source_0
+  id: blocks_udp_source
   parameters:
     affinity: ''
     alias: ''
-    begin_tag: pmt.PMT_NIL
-    comment: ''
-    file: iq_path
-    length: '0'
+    comment: 'Raw interleaved int16 pairs: UDP delimits the
+
+      datagrams, so there is no header to strip.'
+    eof: 'False'
+    ipaddr: 0.0.0.0
     maxoutbuf: '0'
     minoutbuf: '0'
-    offset: '0'
-    repeat: 'True'
-    type: complex
+    port: udp_port
+    psize: '1472'
+    type: short
     vlen: '1'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [104, 172]
+    coordinate: [88, 180]
     rotation: 0
     state: enabled
-- name: blocks_throttle_0
-  id: blocks_throttle
+- name: blocks_interleaved_short_to_complex_0
+  id: blocks_interleaved_short_to_complex
   parameters:
     affinity: ''
     alias: ''
-    comment: ''
-    ignoretag: 'True'
+    comment: Scales the 16-bit datapath word to +/-1.0
     maxoutbuf: '0'
     minoutbuf: '0'
-    samples_per_second: samp_rate
-    type: complex
-    vlen: '1'
+    scale_factor: '32768'
+    swap: 'False'
+    vector_input: 'False'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [352, 188]
+    coordinate: [336, 196]
     rotation: 0
     state: enabled
 - name: qtgui_freq_sink_x_0
@@ -235,10 +237,10 @@ blocks:
     state: enabled
 
 connections:
-- [blocks_file_source_0, '0', blocks_throttle_0, '0']
-- [blocks_throttle_0, '0', qtgui_freq_sink_x_0, '0']
-- [blocks_throttle_0, '0', qtgui_const_sink_x_0, '0']
-- [blocks_throttle_0, '0', qtgui_time_sink_x_0, '0']
+- [blocks_udp_source_0, '0', blocks_interleaved_short_to_complex_0, '0']
+- [blocks_interleaved_short_to_complex_0, '0', qtgui_freq_sink_x_0, '0']
+- [blocks_interleaved_short_to_complex_0, '0', qtgui_const_sink_x_0, '0']
+- [blocks_interleaved_short_to_complex_0, '0', qtgui_time_sink_x_0, '0']
 
 metadata:
   file_format: 1
